@@ -78,6 +78,32 @@ def test_extract_best_empty_payload():
     assert model.extract_best({})["Home"]["odds"] == 0.0
 
 
+def test_xg_venue_rate_and_blend():
+    no_xg = _team(20, 10, 10)
+    assert model.venue_rate_xg(no_xg, "home", "for") is None
+    # blended == goals-only when no xG present
+    assert model.blended_rate(no_xg, "home", "for") == model.venue_rate(no_xg, "home", "for")
+
+    with_xg = dict(no_xg)
+    with_xg.update({"xg_played": 10, "xg_for": 25.0, "xg_against": 8.0,
+                    "home_xg_played": 5, "home_xg_for": 14.0, "home_xg_against": 3.0})
+    xg_rate = model.venue_rate_xg(with_xg, "home", "for")
+    assert xg_rate is not None and xg_rate > 0
+    blended = model.blended_rate(with_xg, "home", "for")
+    goals_only = model.venue_rate(with_xg, "home", "for")
+    # blend sits between the two signals
+    assert min(goals_only, xg_rate) <= blended <= max(goals_only, xg_rate)
+
+
+def test_expected_goals_uses_xg_when_enabled():
+    base = _team(10, 10, 10)            # neutral goals form
+    hot_xg = dict(base)
+    hot_xg.update({"xg_played": 10, "xg_for": 30.0, "xg_against": 6.0})  # strong underlying
+    eh_xg, _ = model.expected_goals(hot_xg, base, use_xg=True)
+    eh_goals, _ = model.expected_goals(hot_xg, base, use_xg=False)
+    assert eh_xg > eh_goals  # xG signal lifts expected goals above goals-only
+
+
 def test_edge_and_kelly():
     assert math.isclose(model.edge(0.5, 2.2), 10.0)
     assert model.kelly(0.5, 1.0) == 0.0        # no payout edge

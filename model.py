@@ -11,13 +11,15 @@ Importable + unit-testable without a running app.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # League-average goals per team per game; only used as a gentle prior fallback.
 DEFAULT_GOALS_PRIOR = 1.35
 # Pseudo-games for venue shrinkage: with few venue games, lean on overall form.
 VENUE_SHRINKAGE_GAMES = 4.0
 MAX_GOALS_GRID = 8
+# Weight on the xG signal when blending with actual goals (xG is more stable/predictive).
+XG_BLEND_ALPHA = 0.6
 
 
 def parse_standings(res: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -82,10 +84,40 @@ def venue_rate(team: Dict[str, Any], venue: str, kind: str) -> float:
     return weight * venue_value + (1.0 - weight) * overall
 
 
-def expected_goals(home: Dict[str, Any], away: Dict[str, Any]) -> Tuple[float, float]:
-    """Expected goals (home, away) from venue-aware attack/defence blends."""
-    eh = (venue_rate(home, "home", "for") + venue_rate(away, "away", "against")) / 2.0
-    ea = (venue_rate(away, "away", "for") + venue_rate(home, "home", "against")) / 2.0
+def venue_rate_xg(team: Dict[str, Any], venue: str, kind: str) -> Optional[float]:
+    """Per-game xG `kind` at `venue`, shrunk to overall xG. None when no xG data."""
+    op = int(team.get("xg_played") or 0)
+    if op <= 0:
+        return None
+    overall = float(team.get(f"xg_{kind}") or 0.0) / op
+    vp = int(team.get(f"{venue}_xg_played") or 0)
+    if vp <= 0:
+        return overall
+    venue_value = float(team.get(f"{venue}_xg_{kind}") or 0.0) / vp
+    weight = vp / (vp + VENUE_SHRINKAGE_GAMES)
+    return weight * venue_value + (1.0 - weight) * overall
+
+
+def blended_rate(team: Dict[str, Any], venue: str, kind: str, *, alpha: float = XG_BLEND_ALPHA) -> float:
+    """Blend the xG rate (if present) with the actual-goals rate; goals-only if no xG."""
+    goals = venue_rate(team, venue, kind)
+    xg = venue_rate_xg(team, venue, kind)
+    if xg is None:
+        return goals
+    return alpha * xg + (1.0 - alpha) * goals
+
+
+def expected_goals(
+    home: Dict[str, Any], away: Dict[str, Any], *, use_xg: bool = True, alpha: float = XG_BLEND_ALPHA
+) -> Tuple[float, float]:
+    """Expected goals (home, away) from venue-aware attack/defence blends.
+
+    When ``use_xg`` and xG fields are present, attack/defence rates blend xG with
+    actual goals (weight ``alpha`` on xG); otherwise pure actual-goals form.
+    """
+    rate = (lambda t, v, k: blended_rate(t, v, k, alpha=alpha)) if use_xg else venue_rate
+    eh = (rate(home, "home", "for") + rate(away, "away", "against")) / 2.0
+    ea = (rate(away, "away", "for") + rate(home, "home", "against")) / 2.0
     # Keep strictly positive and bounded for a stable Poisson.
     return (min(max(eh, 0.05), 6.0), min(max(ea, 0.05), 6.0))
 
@@ -100,9 +132,11 @@ def _score_grid(eh: float, ea: float, max_goals: int = MAX_GOALS_GRID):
     return ph, pa
 
 
-def match_model(home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID) -> Dict[str, float]:
+def match_model(
+    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+) -> Dict[str, float]:
     """1X2 probabilities from an independent-Poisson score grid (normalised)."""
-    eh, ea = expected_goals(home, away)
+    eh, ea = expected_goals(home, away, use_xg=use_xg)
     ph, pa = _score_grid(eh, ea, max_goals)
     home_p = draw_p = away_p = 0.0
     for i in range(max_goals + 1):
@@ -118,9 +152,11 @@ def match_model(home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = 
     return {"Home": home_p / total, "Draw": draw_p / total, "Away": away_p / total}
 
 
-def goal_model(home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID) -> Dict[str, float]:
+def goal_model(
+    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+) -> Dict[str, float]:
     """Over 2.5 and BTTS from the same expected-goals Poisson grid."""
-    eh, ea = expected_goals(home, away)
+    eh, ea = expected_goals(home, away, use_xg=use_xg)
     ph, pa = _score_grid(eh, ea, max_goals)
     over25 = 0.0
     btts = 0.0
