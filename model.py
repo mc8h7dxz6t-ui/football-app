@@ -35,6 +35,7 @@ def parse_standings(res: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
             tid = team["team"]["id"]
         except (KeyError, TypeError):
             continue
+        team_name = str((team.get("team") or {}).get("name") or "")
 
         def _split(block: Dict[str, Any]) -> Dict[str, int]:
             return {
@@ -47,6 +48,7 @@ def parse_standings(res: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         home = _split(team.get("home") or {})
         away = _split(team.get("away") or {})
         table[tid] = {
+            "name": team_name,
             "played": all_["played"],
             "goals_for": all_["for"],
             "goals_against": all_["against"],
