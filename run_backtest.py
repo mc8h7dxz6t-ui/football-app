@@ -23,6 +23,7 @@ import requests
 
 import backtest as bt
 from model import edge, expected_goals, extract_best, goal_model, match_model, parse_standings
+from xg_sources import attach_xg, fetch_understat_team_xg
 
 BASE_URL = "https://v3.football.api-sports.io"
 FINISHED = {"FT", "AET", "PEN"}
@@ -58,9 +59,13 @@ def run(days: int, leagues: List[int], season: int, min_edge: float, use_xg: boo
     bets: List[Dict[str, Any]] = []
     calls = 0
 
+    xg_matched = 0
     for league_id in leagues:
         standings = parse_standings(_get("standings", {"league": league_id, "season": season}, key))
         calls += 1
+        if use_xg:
+            standings, m = attach_xg(standings, fetch_understat_team_xg(league_id, season))
+            xg_matched += m
         for i in range(1, days + 1):
             date = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
             fixtures = _get("fixtures", {"league": league_id, "date": date}, key)
@@ -98,7 +103,8 @@ def run(days: int, leagues: List[int], season: int, min_edge: float, use_xg: boo
 
     out: Dict[str, Any] = {
         "params": {"days": days, "leagues": leagues, "season": season, "use_xg": use_xg,
-                   "with_odds": with_odds, "min_edge": min_edge, "api_calls": calls},
+                   "with_odds": with_odds, "min_edge": min_edge, "api_calls": calls,
+                   "xg_teams_matched": xg_matched},
         "calibration": bt.evaluate(records),
     }
     if with_odds:

@@ -15,6 +15,7 @@ from model import (
     match_model,
     parse_standings,
 )
+from xg_sources import attach_xg
 
 # ======================
 # CONFIG
@@ -95,6 +96,21 @@ def get_standings(league_id: int, season: int) -> Dict[int, Dict[str, Any]]:
     return parse_standings(_api_get("standings", {"league": league_id, "season": season}))
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_team_xg(league_id: int, season: int) -> Dict[str, Dict[str, float]]:
+    """Backup season xG from Understat (big-5 only); {} elsewhere."""
+    from xg_sources import fetch_understat_team_xg
+
+    return fetch_understat_team_xg(league_id, season)
+
+
+def standings_with_xg(league_id: int, season: int, use_xg: bool) -> Dict[int, Dict[str, Any]]:
+    standings = get_standings(league_id, season)
+    if use_xg:
+        standings, _ = attach_xg(standings, get_team_xg(league_id, season))
+    return standings
+
+
 # ======================
 # APP
 # ======================
@@ -134,7 +150,7 @@ with scan_tab:
         progress = st.progress(0.0, text="Scanning…")
         for idx, league_name in enumerate(selected_leagues):
             league_id = LEAGUES[league_name]
-            standings = get_standings(league_id, int(season))
+            standings = standings_with_xg(league_id, int(season), use_xg)
             for i in range(int(days_ahead)):
                 date = (datetime.now(timezone.utc) + timedelta(days=i)).strftime("%Y-%m-%d")
                 for f in get_fixtures(league_id, date).get("response", []):
@@ -194,7 +210,7 @@ with backtest_tab:
         progress = st.progress(0.0, text="Replaying…")
         for idx, league_name in enumerate(selected_leagues):
             league_id = LEAGUES[league_name]
-            standings = get_standings(league_id, int(season))
+            standings = standings_with_xg(league_id, int(season), use_xg)
             for i in range(1, int(lookback) + 1):
                 date = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
                 for f in get_fixtures(league_id, date).get("response", []):

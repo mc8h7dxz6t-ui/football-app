@@ -52,6 +52,27 @@ can't contradict each other:
 API responses are cached (`st.cache_data`) to respect free-tier rate limits, and every
 request is timeout-guarded and failure-tolerant.
 
+## Backup xG sources (`xg_sources.py`)
+
+The model blends xG into form when xG fields are present. Sources, in order of practicality:
+
+| Source | Coverage | Cost / notes |
+|--------|----------|--------------|
+| **Understat** (via `soccerdata`) | **Big-5** (EPL, La Liga, Bundesliga, Serie A, Ligue 1) | ✅ Free, reliable, includes home/away xG. **Wired in** (`fetch_understat_team_xg`). |
+| **FBref / StatsBomb** (via `soccerdata`) | Broad (Championship, Eredivisie, Primeira, Scottish Prem, …) | Needs a browser/anti-scrape layer (FBref returns 403 to plain requests); rate-limited. Next step for non-big-5 coverage. |
+| **API-Football** fixture statistics | Wherever API-Football has it | Primary but **quota-heavy** (1 call per fixture). |
+
+Enable the backup:
+
+```bash
+pip install -r requirements-xg.txt     # soccerdata (heavy, optional — imported lazily)
+```
+
+With **Blend xG** on (sidebar) the app pulls Understat season xG for big-5 leagues,
+matches teams to the table by normalised name, and blends it into expected goals.
+Non-big-5 leagues degrade gracefully to goals-only. Verified live (EPL 2025/26 → 20
+teams, e.g. Man City ~2.1 xGF/g, Arsenal ~0.9 xGA/g).
+
 ## Calibration (`backtest.py`)
 
 Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, `top_pick_accuracy`,
