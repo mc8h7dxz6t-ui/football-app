@@ -42,7 +42,9 @@ A single **independent-Poisson** model drives every market, so 1X2 / Over 2.5 / 
 can't contradict each other:
 
 - **expected_goals** — venue-aware: home team's home attack + away team's away defence,
-  with **shrinkage** toward overall form when the venue sample is thin.
+  with **shrinkage** toward overall form when the venue sample is thin. When **xG** fields
+  are present it blends xG with actual goals (`XG_BLEND_ALPHA`, default 0.6) — xG is more
+  stable/predictive than raw goals. Toggle "Blend xG" in the sidebar (`use_xg`).
 - **match_model / goal_model** — 1X2, Over 2.5 and BTTS from the same Poisson score grid.
 - **extract_best** — best decimal odds per market across bookmakers (line shopping).
 - **edge / kelly** — expected value % and fractional-Kelly stake.
@@ -56,8 +58,37 @@ Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, `top_pick_accu
 `calibration_table`, and `evaluate`. The uniform 1/3 baseline Brier is ~0.667 — beating
 it is the bar for "the model has signal."
 
+The in-app **Backtest** tab can also compare the model against the **de-vigged market**
+(`evaluate_vs_market`) and run a flat-stake **value-bet ROI** (`roi_backtest`).
+
 > The in-app backtest uses the *current* league table, so it is mildly in-sample
 > (approximate). Treat it as a sanity signal, not a forward backtest.
+
+### Headless runner + engine validation (`run_backtest.py`)
+
+```bash
+# Live (needs a valid key): model vs market + ROI over recent finished fixtures
+API_SPORTS_KEY=... python run_backtest.py --days 14 --leagues 39,140 --with-odds
+
+# Deterministic simulation (no API) — validates the engine + backtest end-to-end
+python run_backtest.py --simulate 6000 --market-noise 0.0    # sharp book
+python run_backtest.py --simulate 6000 --market-noise 0.10   # soft book
+```
+
+**What the simulation shows** (true rates generate scores; the model only sees a noisy
+season; the market is the de-vigged truth ± `market-noise`):
+
+| Metric | Result |
+|--------|--------|
+| Model Brier vs uniform 0.667 | **~0.648** — real signal (beats a coin flip) |
+| Model vs **sharp** market Brier | market ~0.636 < model — a sharp book is sharper (expected) |
+| Calibration | well-calibrated to ~50%, **overconfident above 50%** |
+| Value ROI vs **sharp** book | **~ −2%** (you only pay the vig) |
+| Value ROI vs **soft** book (noise 0.10) | **~ +10%** (model exploits mispricing) |
+
+Takeaway: the engine has genuine signal but won't beat a sharp market — its edge is in
+finding **soft/mispriced lines**, which is exactly what the value scan + line-shopping
+are for.
 
 ## Tests
 

@@ -113,6 +113,7 @@ with st.sidebar:
     bankroll = st.number_input("Bankroll (£)", min_value=0.0, value=1000.0, step=50.0)
     min_edge = st.slider("Minimum Edge %", 0.0, 10.0, 2.5)
     kelly_frac = st.slider("Kelly Fraction", 0.1, 1.0, 0.25)
+    use_xg = st.checkbox("Blend xG (when available)", value=True)
     season = st.number_input("Season (start year)", min_value=2015, max_value=2100, value=current_season())
     selected_leagues = st.multiselect(
         "Leagues", options=list(LEAGUES.keys()), default=list(LEAGUES.keys())
@@ -148,7 +149,7 @@ with scan_tab:
                         continue
                     best = extract_best(get_odds(fixture_id))
                     home, away = standings[home_id], standings[away_id]
-                    probs = {**match_model(home, away), **goal_model(home, away)}
+                    probs = {**match_model(home, away, use_xg=use_xg), **goal_model(home, away, use_xg=use_xg)}
                     for sel, prob in probs.items():
                         odds = best[sel]["odds"]
                         if odds <= 1.0:
@@ -182,12 +183,14 @@ with backtest_tab:
         icon="⚠️",
     )
     lookback = st.slider("Look back (days)", 3, 30, 14)
+    include_market = st.checkbox("Compare vs market + ROI (1 odds call per fixture)", value=False)
 
     if st.button("Run Backtest", key="bt"):
         if not selected_leagues:
             st.warning("Select at least one league.")
             st.stop()
         records = []
+        bets = []
         progress = st.progress(0.0, text="Replaying…")
         for idx, league_name in enumerate(selected_leagues):
             league_id = LEAGUES[league_name]
@@ -198,6 +201,7 @@ with backtest_tab:
                     try:
                         if f["fixture"]["status"]["short"] not in FINISHED_STATUSES:
                             continue
+                        fid = f["fixture"]["id"]
                         home_id = f["teams"]["home"]["id"]
                         away_id = f["teams"]["away"]["id"]
                         hg = int(f["goals"]["home"])
@@ -206,8 +210,19 @@ with backtest_tab:
                         continue
                     if home_id not in standings or away_id not in standings:
                         continue
-                    probs = match_model(standings[home_id], standings[away_id])
-                    records.append({"probs": probs, "outcome": bt.settle_1x2(hg, ag)})
+                    probs = match_model(standings[home_id], standings[away_id], use_xg=use_xg)
+                    outcome = bt.settle_1x2(hg, ag)
+                    rec = {"probs": probs, "outcome": outcome}
+                    if include_market:
+                        best = extract_best(get_odds(fid))
+                        market = bt.implied_probs_1x2(best["Home"]["odds"], best["Draw"]["odds"], best["Away"]["odds"])
+                        if market:
+                            rec["market_probs"] = market
+                        for sel in ("Home", "Draw", "Away"):
+                            odds = best[sel]["odds"]
+                            if odds > 1.0 and edge(probs[sel], odds) >= min_edge:
+                                bets.append({"won": sel == outcome, "odds": odds, "stake": 1.0})
+                    records.append(rec)
             progress.progress((idx + 1) / len(selected_leagues), text=f"Replayed {league_name}")
         progress.empty()
 
@@ -223,5 +238,25 @@ with backtest_tab:
             if summary["calibration"]:
                 st.subheader("Calibration (top-pick)")
                 st.dataframe(pd.DataFrame(summary["calibration"]), use_container_width=True)
+
+            if include_market:
+                vm = bt.evaluate_vs_market(records)
+                roi = bt.roi_backtest(bets)
+                st.subheader("Vs market (de-vigged)")
+                if vm["n_paired"]:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Model Brier", vm["model"]["brier_score"])
+                    m2.metric("Market Brier", vm["market"]["brier_score"], help=vm["verdict"] or "")
+                    m3.metric("Δ vs market", vm["brier_delta_vs_market"], help="negative = model beats market")
+                else:
+                    st.info("No fixtures with usable 1X2 odds for a market comparison.")
+                st.subheader("Value-bet ROI (flat stake)")
+                if roi["bets"]:
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Bets", roi["bets"])
+                    r2.metric("Hit rate", f"{roi['hit_rate_pct']}%")
+                    r3.metric("ROI", f"{roi['roi_pct']}%", help=f"P&L {roi['pnl_units']} units")
+                else:
+                    st.info("No value bets cleared the edge threshold in the window.")
 
 st.caption("Analytical/research tool only. Betting carries financial risk; validate before staking real money.")
