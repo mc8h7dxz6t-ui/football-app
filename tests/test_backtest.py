@@ -40,6 +40,41 @@ def test_calibration_table_buckets():
     assert row["actual_pct"] == 80.0  # 4/5 correct
 
 
+def test_implied_probs_devig():
+    p = bt.implied_probs_1x2(2.0, 4.0, 4.0)
+    assert p is not None
+    assert abs(sum(p.values()) - 1.0) < 1e-9
+    assert p["Home"] > p["Draw"]            # shortest price = highest prob
+    assert bt.implied_probs_1x2(0, 4.0, 4.0) is None
+    assert bt.implied_probs_1x2(1.0, 4.0, 4.0) is None
+
+
+def test_evaluate_vs_market_verdict():
+    recs = [
+        {"probs": {"Home": 0.9, "Draw": 0.05, "Away": 0.05},
+         "market_probs": {"Home": 0.5, "Draw": 0.25, "Away": 0.25}, "outcome": "Home"},
+        {"probs": {"Home": 0.05, "Draw": 0.05, "Away": 0.9},
+         "market_probs": {"Home": 0.25, "Draw": 0.25, "Away": 0.5}, "outcome": "Away"},
+    ]
+    out = bt.evaluate_vs_market(recs)
+    assert out["n_paired"] == 2
+    assert out["model"]["brier_score"] < out["market"]["brier_score"]
+    assert out["verdict"] == "model beats market"
+    assert out["brier_delta_vs_market"] < 0
+
+
+def test_roi_backtest():
+    bets = [
+        {"won": True, "odds": 2.5, "stake": 1.0},   # +1.5
+        {"won": False, "odds": 3.0, "stake": 1.0},  # -1.0
+    ]
+    r = bt.roi_backtest(bets)
+    assert r["bets"] == 2 and r["wins"] == 1
+    assert abs(r["pnl_units"] - 0.5) < 1e-9
+    assert r["roi_pct"] == 25.0
+    assert bt.roi_backtest([])["roi_pct"] is None
+
+
 def test_evaluate_summary_and_empty():
     recs = [_rec(0.6, 0.2, 0.2, "Home"), _rec(0.2, 0.2, 0.6, "Away")]
     summ = bt.evaluate(recs)
