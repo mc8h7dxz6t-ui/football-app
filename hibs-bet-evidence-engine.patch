@@ -1,7 +1,7 @@
 From 2171d06d6693c46ebe19a57e9662297b5504febd Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:10:42 +0000
-Subject: [PATCH 01/27] TRD-089: wire tick-to-trade telemetry into live
+Subject: [PATCH 01/28] TRD-089: wire tick-to-trade telemetry into live
  execution hot path
 
 Record record_tick_to_trade() on the real StrategyRunner routed path
@@ -190,7 +190,7 @@ index 18552d1..e7496c3 100644
 From 5134389bf54b392a1885047dad3d32dbcdf9f981 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:11:20 +0000
-Subject: [PATCH 02/27] docs: add prop-desk strategy & trajectory (Line-Shop ->
+Subject: [PATCH 02/28] docs: add prop-desk strategy & trajectory (Line-Shop ->
  Arb -> Market-Making)
 
 Capture the unifying thesis behind football, racing, and trading_core as
@@ -330,7 +330,7 @@ index 0000000..3319a76
 From 70fe694f5a04945ed2c42cecb5fcaee7d25b4ce2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:54:44 +0000
-Subject: [PATCH 03/27] docs: queue trading-repo extraction plan for next agent
+Subject: [PATCH 03/28] docs: queue trading-repo extraction plan for next agent
 
 Executable scope to split trading_core out of hibs-bet into a standalone
 hibs-trading repo (peer to football/racing). Includes exact file
@@ -476,7 +476,7 @@ index 0000000..647b072
 From 2c2be859e9e2a343c49a6074f5f45d76a6b049b0 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:17:18 +0000
-Subject: [PATCH 04/27] docs: add rebase note to extraction plan (origin/main
+Subject: [PATCH 04/28] docs: add rebase note to extraction plan (origin/main
  +5, strategy_runner overlap)
 
 origin/main advanced to fa22a8e after this branch was cut; commit 18dd2f6
@@ -514,7 +514,7 @@ index 647b072..1d3a402 100644
 From 490840d10b5095e2150a067c391e59d4b1d95677 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:29:51 +0000
-Subject: [PATCH 05/27] inst++: add statistical-significance evidence engine
+Subject: [PATCH 05/28] inst++: add statistical-significance evidence engine
  for value gating
 
 Add evidence_stats.py: deterministic (seeded) bootstrap ROI confidence
@@ -1131,7 +1131,7 @@ index e0a146b..b423508 100644
 From a8d7b38322b01d019e51f4af97fd3b888f5e7395 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:29:51 +0000
-Subject: [PATCH 06/27] fix(players): merge duplicate extra_js Jinja block
+Subject: [PATCH 06/28] fix(players): merge duplicate extra_js Jinja block
  (restores players page)
 
 templates/players.html declared {% block extra_js %} twice, which raises
@@ -1168,7 +1168,7 @@ index 54cdaf6..2b0411a 100644
 From 82d68f34a6eeeaee94ee70813437312b0f7087d2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:30:33 +0000
-Subject: [PATCH 07/27] docs: institutional++ roadmap + work queue
+Subject: [PATCH 07/28] docs: institutional++ roadmap + work queue
 
 Capture Tier-0 done (evidence-significance engine, TRD-089, players fix)
 and the prioritized next-agent queue: significance as the promotion gate
@@ -1290,7 +1290,7 @@ index d838ade..7f4958f 100644
 From baa9a77ca0ea9f950722cd2fefef20aa5fc580f2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:31:22 +0000
-Subject: [PATCH 08/27] docs: update extraction-plan rebase note (branch
+Subject: [PATCH 08/28] docs: update extraction-plan rebase note (branch
  already rebased, overlap resolved)
 
 ---
@@ -1326,7 +1326,7 @@ index 1d3a402..f386d9f 100644
 From 32862fcaa32995c67850349876821f3ece1d1356 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:22 +0000
-Subject: [PATCH 09/27] fix(tests): align prediction_log_auto with
+Subject: [PATCH 09/28] fix(tests): align prediction_log_auto with
  HIBS_AUDIT_REQUIRE_ODDS=1 default
 
 The audit-require-odds default flipped to 1 (forward odds-capture work),
@@ -1386,7 +1386,7 @@ index 555094f..6223e68 100644
 From ce8e784f20034307dec12a8ec4f845ec3c43f265 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:22 +0000
-Subject: [PATCH 10/27] fix(gate-compare): restore os.environ after profile
+Subject: [PATCH 10/28] fix(gate-compare): restore os.environ after profile
  eval (deterministic CI)
 
 _apply_profile_env mutated global os.environ without restoring, leaking
@@ -1556,7 +1556,7 @@ index b423508..fc1cfb2 100644
 From f9439abf9ec7334a4228424c4d370f86b5e05a3d Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:43 +0000
-Subject: [PATCH 11/27] docs: mark all pre-existing CI failures cleared (suite
+Subject: [PATCH 11/28] docs: mark all pre-existing CI failures cleared (suite
  green 600/0)
 
 ---
@@ -1611,7 +1611,7 @@ index f386d9f..7b92367 100644
 From 3811827f353094aad44ff45a2150d136b5526730 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:38:30 +0000
-Subject: [PATCH 12/27] inst++: add classify_binomial_evidence (Wilson-CI
+Subject: [PATCH 12/28] inst++: add classify_binomial_evidence (Wilson-CI
  proportion grading)
 
 Sister classifier to classify_evidence for binary edges (CLV beat-close,
@@ -1882,7 +1882,7 @@ index 1bd067f..1ad938a 100644
 From c84fc3081f0627894121ec3b5211ac551077d404 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:38:40 +0000
-Subject: [PATCH 13/27] docs: note binomial Wilson-CI classifier in roadmap
+Subject: [PATCH 13/28] docs: note binomial Wilson-CI classifier in roadmap
  (uniform EvidenceVerdict)
 
 ---
@@ -1909,7 +1909,7 @@ index 3feb5f9..d5c5b7c 100644
 From a4d157c59bfce8f9c457f8c5c3048df2031129cc Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:15:21 +0000
-Subject: [PATCH 14/27] inst++: blended CLV gate (frequency x magnitude) +
+Subject: [PATCH 14/28] inst++: blended CLV gate (frequency x magnitude) +
  precision experiment
 
 Add classify_clv_edge: a beat-close edge must clear BOTH the Wilson
@@ -2142,7 +2142,7 @@ index 1ad938a..b9ea04d 100644
 From 6bf334a23ebb6a4b13c7325f5e2a2e73a0e2d69e Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:15:32 +0000
-Subject: [PATCH 15/27] docs: record blended CLV gate + precision experiment in
+Subject: [PATCH 15/28] docs: record blended CLV gate + precision experiment in
  roadmap
 
 ---
@@ -2168,7 +2168,7 @@ index d5c5b7c..4034ff0 100644
 From 8a2b168e7ebfbdad89f2154c67fbfd60a30ab93e Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:38:00 +0000
-Subject: [PATCH 16/27] inst++: add magnitude floor to continuous value-leg
+Subject: [PATCH 16/28] inst++: add magnitude floor to continuous value-leg
  gate (two-part sieve)
 
 Fold min_edge_magnitude_pct into classify_evidence (default 0.0 = inert,
@@ -2384,7 +2384,7 @@ index b9ea04d..e3350dd 100644
 From f29195cd9d300d22b2968f262e385a7003f7f416 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:38:12 +0000
-Subject: [PATCH 17/27] docs: record value-leg magnitude floor (two-part sieve)
+Subject: [PATCH 17/28] docs: record value-leg magnitude floor (two-part sieve)
  in roadmap
 
 ---
@@ -2410,7 +2410,7 @@ index 4034ff0..c958281 100644
 From 5284b289ef4fcff441e7eaa162effc303f115a26 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:45:48 +0000
-Subject: [PATCH 18/27] inst++: deterministic promotion-threshold sweep harness
+Subject: [PATCH 18/28] inst++: deterministic promotion-threshold sweep harness
 
 Pre-baked optimizer (pure, stdlib + evidence_stats only) so the desk can
 tune gates the moment Q2 forward-capture populates rows. Grids over
@@ -2722,7 +2722,7 @@ index 0000000..9d0188a
 From 21300fc065d10b846bba1fc6eb5ab4a61c587442 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:46:13 +0000
-Subject: [PATCH 19/27] docs: record sweep harness + dashboard verdict schema
+Subject: [PATCH 19/28] docs: record sweep harness + dashboard verdict schema
  (Q1) in roadmap
 
 ---
@@ -2763,7 +2763,7 @@ index c958281..ecc031e 100644
 From 52afa0c7cfa4e3bdc637111e9790274dd8a17b14 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:51:45 +0000
-Subject: [PATCH 20/27] inst++: wire evidence verdicts into /api/health
+Subject: [PATCH 20/28] inst++: wire evidence verdicts into /api/health
  (decoupled, null-safe)
 
 Add evidence_health_blocks(): value-leg 'evidence' read from the last
@@ -3027,7 +3027,7 @@ index fc1cfb2..28df303 100644
 From fbe9bc4a21d8f4ff0558fec50aa6ff59460d14d9 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:52:06 +0000
-Subject: [PATCH 21/27] docs: record /api/health evidence wiring done; frontend
+Subject: [PATCH 21/28] docs: record /api/health evidence wiring done; frontend
  render remains (Q1)
 
 ---
@@ -3063,7 +3063,7 @@ index ecc031e..66ccaf3 100644
 From 57627923c12a9361bb35bb202ec5030be2b2cd8b Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:56:05 +0000
-Subject: [PATCH 22/27] docs/env: stage promotion-floor vars + EvidenceVerdict
+Subject: [PATCH 22/28] docs/env: stage promotion-floor vars + EvidenceVerdict
  payload contract for hand-off
 
 Document HIBS_VALUE_MIN_EDGE_PCT and HIBS_CLV_MIN_PP in .env.example
@@ -3141,7 +3141,7 @@ index 66ccaf3..346fb76 100644
 From ffab220f128d29e502dc7f6557c1d3a2d7be36e6 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 18:20:15 +0000
-Subject: [PATCH 23/27] =?UTF-8?q?inst++:=20racing=20gate-coverage=20amendm?=
+Subject: [PATCH 23/28] =?UTF-8?q?inst++:=20racing=20gate-coverage=20amendm?=
  =?UTF-8?q?ents=20=E2=80=94=20drop-in=20tested=20hand-off?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3759,7 +3759,7 @@ index 0000000..2de9f2a
 From 9ff5b7259628e2e824a2078cdf1e2761b574d91f Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 22:59:06 +0000
-Subject: [PATCH 24/27] docs(racing): institutional++ runbook to take build 7
+Subject: [PATCH 24/28] docs(racing): institutional++ runbook to take build 7
  -> 9 (ordered, accept checks)
 
 ---
@@ -3921,7 +3921,7 @@ index 0000000..f0e8946
 From 23126920118d77541d5385d9175a958ea03f1c33 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:03:48 +0000
-Subject: [PATCH 25/27] docs: institutional++ build runbooks for football (->9)
+Subject: [PATCH 25/28] docs: institutional++ build runbooks for football (->9)
  and trading (8->9)
 
 ---
@@ -4131,7 +4131,7 @@ index 0000000..2d18c8c
 From 9c1e0e11984d66145c19c20b25f2ec68e0d0fbcc Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:07:17 +0000
-Subject: [PATCH 26/27] docs: master access + go-live checklist (value-soonest
+Subject: [PATCH 26/28] docs: master access + go-live checklist (value-soonest
  sequencing across all lanes)
 
 ---
@@ -4228,7 +4228,7 @@ index 0000000..edabeba
 From a90cc780f86725197a8c2f06083592da4e513920 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:26:36 +0000
-Subject: [PATCH 27/27] =?UTF-8?q?docs(racing):=20amend=20runbook=20to=20in?=
+Subject: [PATCH 27/28] =?UTF-8?q?docs(racing):=20amend=20runbook=20to=20in?=
  =?UTF-8?q?st++=20=E2=80=94=20Wilson-lowerbound=20gates,=20illustrative-co?=
  =?UTF-8?q?mmand=20caveat,=20machine-checkable=20sign-off=20signature,=20n?=
  =?UTF-8?q?o=20overclaim?=
@@ -4306,6 +4306,33 @@ index f0e8946..c8d8832 100644
  VPS timer active: Y/N   CI gate: green/red   Matchbook coverage: ____%
  Verdict: GO 9/10 / NOT YET (reasons)
  ```
+-- 
+2.43.0
+
+
+From a4fb352c64bc2cb77c89453bb6b386e64aa32622 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 23:30:54 +0000
+Subject: [PATCH 28/28] docs: guard against hand-setting promotion floors to
+ 1.0 (launch=0.0, sweep-tuned only)
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 4a0af3e..bb79a72 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -107,6 +107,8 @@ Producers: `evidence_stats.classify_evidence` (roi), `classify_binomial_evidence
+ 
+ Both are read at request time (`os.getenv`), so changing them is a config-only redeploy — no code change. They affect *grading/promotion only*, never the prediction engine, DQ, or stored snapshots.
+ 
++> ⛔ **Do NOT hand-set these to 1.0 (or any value) at launch.** There is no CLV/value data yet to justify a floor; a blind floor either starves all promotions or is arbitrary. **Launch baseline = `0.0`.** The only sanctioned way to raise them is the `evidence_sweep` harness on real forward data (rank by weighted F-β → `best_thresholds`). Racing floors (`HIBS_RACING_COHORT_DENSITY_FLOOR`, `HIBS_MAIDEN_ADVISORY_FLOOR`) belong in the **`hibs-racing`** repo config, **not** hibs-bet's `.env`.
++
+ ## Per-lane build runbooks (7/8 → 9)
+ - Football: [FOOTBALL_RUNBOOK_TO_9.md](./FOOTBALL_RUNBOOK_TO_9.md) — land evidence engine + dashboard render + CI gate.
+ - Trading: [TRADING_RUNBOOK_8_TO_9.md](./TRADING_RUNBOOK_8_TO_9.md) — TRD-089 live + repo split + drills/alerts + CI gate.
 -- 
 2.43.0
 
