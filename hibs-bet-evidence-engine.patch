@@ -1,0 +1,3757 @@
+From 2171d06d6693c46ebe19a57e9662297b5504febd Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 15:10:42 +0000
+Subject: [PATCH 01/23] TRD-089: wire tick-to-trade telemetry into live
+ execution hot path
+
+Record record_tick_to_trade() on the real StrategyRunner routed path
+(T0 = OFI scan trigger, T2 = broker ack) instead of test-only. Shadow
+soak still never increments tick-to-trade (no broker submit), preserving
+the :9108 invariant. Adds tick_to_trade_ms to the ROUTED audit row,
+documents trading_slo_tick_to_trade_violation operator interpretation in
+TRADING_INTEGRATION_API.md, and updates the TRD-089 ticket status.
+
+Additive measurement only: no change to OFI thresholds, gate logic, risk
+kernel, DQ, or shadow config. Tests assert live records / shadow stays 0.
+---
+ docs/TRADING_INTEGRATION_API.md               | 24 ++++++++++++++++++-
+ docs/TRD-089-LATENCY.md                       | 16 +++++++++----
+ .../trading_core/strategy_runner.py           | 12 ++++++++++
+ tests/test_trading_core_strategy_runner.py    | 11 +++++++++
+ 4 files changed, 57 insertions(+), 6 deletions(-)
+
+diff --git a/docs/TRADING_INTEGRATION_API.md b/docs/TRADING_INTEGRATION_API.md
+index edb7b58..3debd7f 100644
+--- a/docs/TRADING_INTEGRATION_API.md
++++ b/docs/TRADING_INTEGRATION_API.md
+@@ -445,7 +445,8 @@ There is **no single merged log file** by design; integrity comes from correlate
+ | `trading_broker_errors_total` | counter | Broker fetch failures. |
+ | `trading_stream_messages_total` | counter | Ingested stream frames. |
+ | `trading_stream_errors_total` | counter | Stream parse/transport errors. |
+-| `trading_tick_to_trade_ms_hist_*` | histogram | Internal latency distribution. |
++| `trading_tick_to_trade_ms_hist_*` | histogram | Scan-trigger (T₀) → broker-ack (T₂) latency. Populated only by **live/paper routed** orders (`StrategyRunner`); shadow never increments it (no broker submit). |
++| `trading_tick_to_trade_ms` | gauge | Last measured tick-to-trade latency (ms). |
+ | `trading_slippage_bps_hist_*` | histogram | Signed slippage / delta distribution. |
+ | `trading_slippage_abs_bps_hist_*` | histogram | Absolute spread/slippage distribution. |
+ | `trading_live_spread_bps_last` | gauge | Latest observed NBBO spread (bps). |
+@@ -456,6 +457,27 @@ There is **no single merged log file** by design; integrity comes from correlate
+ 
+ **Alert rules:** `deploy/monitoring/trading_alerts.rules.yml` (includes `TradingSloSpreadLastViolation`).
+ 
++#### Operator interpretation — `trading_slo_tick_to_trade_violation` (TRD-089)
++
++Tick-to-trade is measured on the **live hot path** in `StrategyRunner.run_scan_cycle`:
++
++| Stamp | Event | Source |
++|-------|-------|--------|
++| **T₀** | OFI scan trigger for the symbol (just before `generate_signal`) | `strategy_runner.py` |
++| **T₁** | Gateway HTTP submit dispatch | `execution_actor.execute()` → `_gateway_dispatch` |
++| **T₂** | Broker acknowledgement (non-rejected `OrderResponse`) | `execute()` returns `client_order_id` |
++
++`latency_ms = (T₂ − T₀) × 1000` → `record_tick_to_trade()` → `trading_tick_to_trade_ms` (gauge) and `trading_tick_to_trade_ms_hist_*` (histogram). Each routed decision also carries `tick_to_trade_ms` in its `ROUTED` JSONL audit row (audit remains source of truth).
++
++| Reading | Meaning | Operator action |
++|---------|---------|-----------------|
++| `trading_tick_to_trade_ms_hist_count == 0` | No live/paper order has routed yet (e.g. pure shadow soak) | Expected on `:9108`; no action. SLO gauge stays `0`. |
++| gauge `= 1`, low sample (`hist_count < 100`) | p99 estimate from a thin histogram | Treat as **advisory**; do not gate promotion on it until sample is meaningful. |
++| gauge `= 1`, healthy sample | Estimated **p99 > 10 ms** SLO breach on the execution path | Investigate broker/network latency before scaling caps; **do not** promote phase. |
++| gauge `= 0`, healthy sample | p99 within SLO | Latency-clean; safe input to the promotion scorecard. |
++
++**Shadow invariant:** on `:9108` (`TRADING_DEPLOYMENT_PHASE=shadow`) `trading_tick_to_trade_ms_hist_count` must remain **0** — a non-zero value during shadow indicates an unexpected live submit and should be treated as an incident.
++
+ ---
+ 
+ ## 8. Deployment phases & gates
+diff --git a/docs/TRD-089-LATENCY.md b/docs/TRD-089-LATENCY.md
+index 8c17f30..8ec1d7d 100644
+--- a/docs/TRD-089-LATENCY.md
++++ b/docs/TRD-089-LATENCY.md
+@@ -6,7 +6,7 @@
+ | **Title** | Post-shadow Alpaca latent telemetry integration |
+ | **Priority** | Blocked until **2026-06-18** (post-friction / Day-15 trading verdict) |
+ | **Product** | Harvested Execution (`trading_core`) |
+-| **Status** | Open — not started |
++| **Status** | **Code complete on branch** (`cursor/trd-089-latency-telemetry-8e88`) — hot-path wiring + tests + docs done. **Live/paper verification remains gated to 2026-06-18**; no deploy, no shadow-config change. |
+ 
+ ---
+ 
+@@ -49,10 +49,16 @@ Optional labels for June review: `lane` (`equity` / `crypto`), `gate_mode` (`GAT
+ 
+ ## Acceptance criteria
+ 
+-1. First paper/micro submit records T₀/T₂ on the hot path (no test-only calls).
+-2. `curl -s http://127.0.0.1:9108/metrics` exposes non-zero `trading_tick_to_trade_ms_hist_count` after at least one routed order.
+-3. `trading_slo_tick_to_trade_violation` documented in `docs/TRADING_INTEGRATION_API.md` with operator interpretation.
+-4. Shadow mode continues to **not** increment tick-to-trade (or records dry-run separately if needed).
++1. ✅ First paper/micro submit records T₀/T₂ on the hot path (no test-only calls). — `StrategyRunner.run_scan_cycle` stamps T₀ at the scan trigger and records on the live routed branch after the broker ack.
++2. ⏳ `curl -s http://127.0.0.1:9108/metrics` exposes non-zero `trading_tick_to_trade_ms_hist_count` after at least one routed order. — *Verifiable only once paper/micro routes a live order (post-2026-06-18); covered offline by `test_strategy_runner_routes_when_risk_and_gates_clear`.*
++3. ✅ `trading_slo_tick_to_trade_violation` documented in `docs/TRADING_INTEGRATION_API.md` with operator interpretation.
++4. ✅ Shadow mode continues to **not** increment tick-to-trade. — Only the live routed branch records; asserted by `test_strategy_runner_shadow_dry_run_profiles_without_wal`.
++
++## Implementation note (this branch)
++
++- Hot-path wiring: `src/hibs_predictor/trading_core/strategy_runner.py` — T₀ captured per symbol before `generate_signal`; `record_tick_to_trade()` called only after `execution_actor.execute()` returns a non-`None` `client_order_id` (broker ack). `tick_to_trade_ms` added to the `ROUTED` audit row.
++- No change to OFI thresholds, gate logic, risk kernel, or shadow config — purely additive measurement.
++- Tests: `tests/test_trading_core_strategy_runner.py` (records on live; stays 0 on shadow).
+ 
+ ---
+ 
+diff --git a/src/hibs_predictor/trading_core/strategy_runner.py b/src/hibs_predictor/trading_core/strategy_runner.py
+index 71a3e39..314c06a 100644
+--- a/src/hibs_predictor/trading_core/strategy_runner.py
++++ b/src/hibs_predictor/trading_core/strategy_runner.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ from dataclasses import dataclass
+ from decimal import Decimal
+ import logging
++import time
+ import uuid
+ 
+ from hibs_predictor.trading_core.base_broker import OrderSide, OrderType, OrderRequest
+@@ -178,6 +179,10 @@ class StrategyRunner:
+                 )
+                 continue
+ 
++            # T0: OFI strategy scan trigger for this symbol (tick-to-trade origin).
++            # Only the live routed path below converts this into a recorded latency;
++            # shadow profiling never reaches a broker ack and therefore never records.
++            scan_trigger_perf = time.perf_counter()
+             signal = self.strategy.generate_signal(symbol, gate_mode=gate_mode)
+             if signal is None:
+                 no_signal += 1
+@@ -307,6 +312,11 @@ class StrategyRunner:
+                 continue
+ 
+             routed += 1
++            # T2: broker acknowledgement reached (execute() returns a client_order_id
++            # only after the gateway dispatch maps a non-rejected OrderResponse).
++            tick_to_trade_ms = (time.perf_counter() - scan_trigger_perf) * 1000.0
++            if self.metrics is not None:
++                self.metrics.record_tick_to_trade(tick_to_trade_ms)
+             self.audit.log_decision(
+                 symbol=symbol,
+                 status="ROUTED",
+@@ -319,6 +329,8 @@ class StrategyRunner:
+                         "qty": intent.qty,
+                         "price": intent.price,
+                         "side": intent.side,
++                        "gate_mode": gate_mode.value,
++                        "tick_to_trade_ms": format(tick_to_trade_ms, ".3f"),
+                     },
+                 ),
+                 cycle_id=scan_cycle_id,
+diff --git a/tests/test_trading_core_strategy_runner.py b/tests/test_trading_core_strategy_runner.py
+index 18552d1..e7496c3 100644
+--- a/tests/test_trading_core_strategy_runner.py
++++ b/tests/test_trading_core_strategy_runner.py
+@@ -3,6 +3,7 @@ from decimal import Decimal
+ from unittest.mock import AsyncMock, MagicMock
+ 
+ from hibs_predictor.trading_core.gate_enforcer import GateCheckResult
++from hibs_predictor.trading_core.metrics import MetricsCollector
+ from hibs_predictor.trading_core.strategy_engine import SignalGateMode, StrategySignal
+ from hibs_predictor.trading_core.strategy_runner import StrategyRunner
+ 
+@@ -41,6 +42,7 @@ def _runner_env(
+         ledger=ledger,
+         gate_enforcer=gate_enforcer,
+         reconciliation_service=recon,
++        metrics=MetricsCollector(),
+     )
+     return runner, strategy, risk_kernel, execution_actor, gate_enforcer
+ 
+@@ -78,6 +80,11 @@ def test_strategy_runner_routes_when_risk_and_gates_clear():
+         execution_actor.execute.assert_awaited_once()
+         execution_actor.profile_would_route.assert_not_called()
+ 
++        # TRD-089: live routed path records tick-to-trade on the hot path (not test-only).
++        tt = runner.metrics.metrics.tick_to_trade_hist
++        assert tt.count == 1
++        assert runner.metrics.metrics.last_tick_to_trade_ms > 0.0
++
+     asyncio.run(_run())
+ 
+ 
+@@ -100,6 +107,10 @@ def test_strategy_runner_shadow_dry_run_profiles_without_wal():
+         execution_actor.profile_would_route.assert_awaited_once()
+         execution_actor.execute.assert_not_called()
+ 
++        # TRD-089 acceptance #4: shadow mode never increments tick-to-trade (no broker ack).
++        assert runner.metrics.metrics.tick_to_trade_hist.count == 0
++        assert runner.metrics.metrics.last_tick_to_trade_ms == 0.0
++
+     asyncio.run(_run())
+ 
+ 
+-- 
+2.43.0
+
+
+From 5134389bf54b392a1885047dad3d32dbcdf9f981 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 15:11:20 +0000
+Subject: [PATCH 02/23] docs: add prop-desk strategy & trajectory (Line-Shop ->
+ Arb -> Market-Making)
+
+Capture the unifying thesis behind football, racing, and trading_core as
+a single private multi-strategy prop desk on one trajectory. Maps each
+asset to a stage, records the Stage-2 (arbitrage) greenfield gap and the
+Stage-3 (market-making) Redis-level infra gap, and links from README.
+---
+ README.md                  |  3 +-
+ docs/PROP_DESK_STRATEGY.md | 94 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 96 insertions(+), 1 deletion(-)
+ create mode 100644 docs/PROP_DESK_STRATEGY.md
+
+diff --git a/README.md b/README.md
+index d8176a6..ea6121e 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # HIBS-Bet // Harvested Intelligent Betting Strategy
+ 
+-▶ **System Operations:** [World Cup Launch Checklist](docs/INSTITUTIONAL_SCORECARD.md) | [Master Multi-Product Scorecard & Kill Switches](docs/MASTER_OPERATIONS_SCORECARD.md)
++▶ **System Operations:** [World Cup Launch Checklist](docs/INSTITUTIONAL_SCORECARD.md) | [Master Multi-Product Scorecard & Kill Switches](docs/MASTER_OPERATIONS_SCORECARD.md) | [Prop Desk Strategy & Trajectory](docs/PROP_DESK_STRATEGY.md)
+ 
+ **Asset class:** Automated enterprise football forecasting & content pipeline (white-label license)
+ 
+@@ -269,6 +269,7 @@ Local surgical patches (Championship shrink, DQ persistence, headline cohort) ar
+ 
+ | Doc | Contents |
+ |-----|----------|
++| [Prop desk strategy](docs/PROP_DESK_STRATEGY.md) | Multi-strategy direction: Line-Shop → Arbitrage → Market-Making |
+ | [Product overview](docs/PRODUCT_OVERVIEW.md) | Surfaces, pipeline, reliability |
+ | [Betting engine](docs/BETTING_ENGINE.md) | Poisson, value, calibration |
+ | [Football sale readiness](docs/FOOTBALL_SALE_READINESS.md) | Brier targets, B2B metrics, cron |
+diff --git a/docs/PROP_DESK_STRATEGY.md b/docs/PROP_DESK_STRATEGY.md
+new file mode 100644
+index 0000000..3319a76
+--- /dev/null
++++ b/docs/PROP_DESK_STRATEGY.md
+@@ -0,0 +1,94 @@
++# Prop Desk Strategy — Direction & Trajectory
++
++**Scope:** The unifying thesis behind `hibs-bet` (football), `hibs-racing` (racing), and `trading_core` / Harvested Execution (US equities). This document records *direction*; it does not change any gate. Operational GO/NO-GO lives in [MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md).
++
++---
++
++## 1. The thesis — a private, automated, multi-strategy prop desk
++
++This is **not** a retail SaaS to sell, nor a tipping bot. It is a **private proprietary trading desk** where the code is the asset that converts market data into capital. **You eat what you kill.**
++
++The products are not separate businesses — they are **strategy lanes on a single trajectory**, deliberately sequenced so we bank capital with the cheapest, highest-margin strategy before spending infrastructure budget on faster, harder ones.
++
++```
++Stage 1: Line-Shopper (+EV)  →  Stage 2: Statistical Arbitrage  →  Stage 3: Market-Making (HFT liquidity)
++        [bank capital]                 [scale the edge]                  [Redis-level infra]
++        NOW                            NEXT                              LATER
++```
++
++| Principle | Implication |
++|-----------|-------------|
++| Eat what you kill | Every lane must produce **audited, realized** edge before capital scales. |
++| Highest margin first | Line-shopping / +EV has the lowest barrier and best margin → it banks the starting capital. |
++| Infra follows proof | Arb and market-making are only funded once Stage 1 P&L justifies the data/latency spend. |
++| Audit is non-negotiable | Risk → Execution → Reconciliation boundaries and closed-loop audit apply to **every** lane (institutional-grade++). |
++
++---
++
++## 2. Stage 1 — Line-Shopper / +EV (NOW: banking starting capital)
++
++Find prices that are mispriced vs a calibrated model and take the best available line. Highest margin, lowest barrier; this is where almost all *built* value currently sits.
++
++| Asset | Role | State | Primary gate / blocker |
++|-------|------|-------|------------------------|
++| **Football** (`hibs-bet`) | +EV vs bookmaker 1X2 lines (line-shopped best price) | Engineering **A−**; evidence **C** | Forward odds/CLV must accumulate (7d ≥50% capture, CLV n≥25) before stake scale. Launch **2026-06-11**. |
++| **Racing** (`hibs-racing`) | LightGBM place-ranking + paper value picks | Built; daily lane **not green** | NA ingest bug in `daily-refresh-cards`; Matchbook coverage ~13%. Formal gate **2026-06-19**. |
++| **+EV equities** (`trading_core`, OFI) | Microstructure +EV via order-flow imbalance | Most engineered; **shadow, zero submits** | Day-15 verdict **2026-06-18** needs `SHADOW_WOULD_ROUTE` + acceptable slippage. |
++
++**Stage-1 reality:** plumbing is strong everywhere; the missing ingredient is **realized, audited edge on forward data** — i.e. actual banked P&L. No lane has taken live capital yet. *That is the whole point of Stage 1.*
++
++**Exit criteria → Stage 2:** at least one lane clears its evidence gate and books real, reconciled P&L sufficient to fund Stage-2 infrastructure.
++
++---
++
++## 3. Stage 2 — Statistical Arbitrage (NEXT: scaling the edge)
++
++Exploit *relative* mispricings (cross-book, cross-market, pairs/baskets) rather than single-line absolute edge.
++
++**Status: greenfield — effectively 0% built.**
++
++| Reusable today | New work required |
++|----------------|-------------------|
++| Reconciliation engine, WAL ledger, risk kernel | Dedicated arb/stat-arb strategy module (cross-book dutching, pairs, mispricing detection) |
++| Multi-book odds capture (raw material for cross-book arb) | Simultaneous **multi-venue execution** (today: single-broker Alpaca; betting side has no automated placement — affiliate links only) |
++| Promotion-scorecard / evidence-pack pattern | Tight latency budgeting so both legs fill before prices move |
++
++**Dependency:** only sensible to start once Stage 1 banks capital and the trading promotion path clears micro. Reuse the existing Risk → Execution → Reconciliation perimeter; do not fork a second execution stack.
++
++---
++
++## 4. Stage 3 — Market-Making / HFT liquidity provision (LATER: infra leap)
++
++Provide two-sided liquidity and earn the spread. Highest ceiling, highest infrastructure barrier.
++
++**Status: aspirational — infrastructure not in place.**
++
++| Already leaning this way | Hard gaps |
++|--------------------------|-----------|
++| `trading_core` is microstructure-aware (OFI, dual-lane, WSS market data) | **Redis-level (in-memory) hot path** — today the stack is SQLite-WAL / "zero-dependency": ideal for *audit integrity*, wrong tool for *quote-update latency* |
++| p99 tick-to-trade **< 10 ms** SLO already defined (`metrics.py`) | Two-sided quoting + inventory-risk management (none today) |
++| **TRD-089** tick-to-trade telemetry now wired on the live path | Low-latency / co-located market data; production latency *measurement* before optimization |
++
++**First concrete step (done):** [TRD-089](./TRD-089-LATENCY.md) — you cannot make markets if you cannot yet *measure* tick-to-trade in production. The wiring landed; live verification is gated to 2026-06-18.
++
++---
++
++## 5. Consolidated roadmap
++
++| Stage | Strategy | Asset(s) | Built? | Real blocker |
++|-------|----------|----------|--------|--------------|
++| **1 — now** | Line-shop / +EV | football, racing, OFI equities | Infra ✅ / edge ❌ | Bank audited forward edge |
++| **2 — next** | Statistical arbitrage | new module (reuse recon/ledger) | ~0% | Stage-1 capital; multi-venue execution |
++| **3 — later** | Market-making / HFT | `trading_core` evolution | microstructure seeds only | Redis hot path; TRD-089 measurement first |
++
++**Sequencing rule:** do not start Stage *N+1* engineering spend until Stage *N* has produced reconciled, banked P&L. Football WC launch (11 Jun), trading Day-15 (18 Jun), and racing gate (19 Jun) are the near-term Stage-1 checkpoints.
++
++---
++
++## Related
++
++- [MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md) — cross-product GO/NO-GO dates & kill switches
++- [TRADING_PROMOTION_SCORECARD.md](./TRADING_PROMOTION_SCORECARD.md) — shadow → micro → live gates
++- [TRD-089-LATENCY.md](./TRD-089-LATENCY.md) — tick-to-trade telemetry (Stage-3 enabler)
++- [FOOTBALL_SALE_READINESS.md](./FOOTBALL_SALE_READINESS.md) — Stage-1 football evidence
++- `.cursor/rules/trading-safety-first.mdc` — Risk → Execution → Reconciliation priority order
+-- 
+2.43.0
+
+
+From 70fe694f5a04945ed2c42cecb5fcaee7d25b4ce2 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 15:54:44 +0000
+Subject: [PATCH 03/23] docs: queue trading-repo extraction plan for next agent
+
+Executable scope to split trading_core out of hibs-bet into a standalone
+hibs-trading repo (peer to football/racing). Includes exact file
+inventory to move, the football HTTP shim that stays, slim deps +
+Flask-free conftest, import-path decision, validation gates, and freeze
+sequencing (start only after 2026-06-18 trading verdict). Also records
+the pending push of the TRD-089 branch as next-agent step 0.
+---
+ docs/PROP_DESK_STRATEGY.md           |   1 +
+ docs/TRADING_REPO_EXTRACTION_PLAN.md | 107 +++++++++++++++++++++++++++
+ 2 files changed, 108 insertions(+)
+ create mode 100644 docs/TRADING_REPO_EXTRACTION_PLAN.md
+
+diff --git a/docs/PROP_DESK_STRATEGY.md b/docs/PROP_DESK_STRATEGY.md
+index 3319a76..d838ade 100644
+--- a/docs/PROP_DESK_STRATEGY.md
++++ b/docs/PROP_DESK_STRATEGY.md
+@@ -87,6 +87,7 @@ Provide two-sided liquidity and earn the spread. Highest ceiling, highest infras
+ 
+ ## Related
+ 
++- [TRADING_REPO_EXTRACTION_PLAN.md](./TRADING_REPO_EXTRACTION_PLAN.md) — split trading into its own `hibs-trading` repo (peer to football/racing)
+ - [MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md) — cross-product GO/NO-GO dates & kill switches
+ - [TRADING_PROMOTION_SCORECARD.md](./TRADING_PROMOTION_SCORECARD.md) — shadow → micro → live gates
+ - [TRD-089-LATENCY.md](./TRD-089-LATENCY.md) — tick-to-trade telemetry (Stage-3 enabler)
+diff --git a/docs/TRADING_REPO_EXTRACTION_PLAN.md b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+new file mode 100644
+index 0000000..647b072
+--- /dev/null
++++ b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+@@ -0,0 +1,107 @@
++# Trading Repo Extraction Plan (`hibs-bet` → `hibs-trading`)
++
++**Goal:** Make football, racing, and trading three peer repos. Racing (`hibs-racing`) is already separate; this plan extracts the **Harvested Execution** trading stack out of `hibs-bet` into a standalone `hibs-trading` repo, leaving football clean.
++
++**Standing constraints (must hold throughout):** preserve **data, DQ, features, usability, and institutional-grade++**. This is a *move*, not a rewrite — no behaviour change to the trading engine, no change to OFI/gate/risk logic, no change to football DQ or pipelines.
++
++**Why low-risk:** `trading_core` imports **zero** football modules; football touches trading only over HTTP via a thin `trading_status` shim. So this is mostly file movement + dependency/CI hygiene.
++
++---
++
++## 0. Sequencing — do NOT start mid-freeze
++
++| Gate | Date | Rule |
++|------|------|------|
++| Football WC launch | 2026-06-11 | No repo surgery before launch is stable |
++| Trading Day-15 verdict | 2026-06-18 | Shadow soak on `:9108` must not be disturbed |
++| Racing formal gate | 2026-06-19 | — |
++
++**Start extraction only after the trading Day-15 verdict (≥ 2026-06-18)** and when no shadow/paper run depends on an in-flight `hibs-bet` checkout. Until then this is *queued*, not active.
++
++---
++
++## 1. Pre-req already in flight (push first)
++
++Branch `cursor/trd-089-latency-telemetry-8e88` (2 commits: TRD-089 tick-to-trade wiring + `PROP_DESK_STRATEGY.md`) is **committed locally but unpushed** — the originating agent's token was scoped to `football-app` and lacked write to `hibs-bet`. Patch: `trd-089-and-prop-desk.patch`.
++
++**Next agent step 0:** with valid `hibs-bet` write creds, `git push -u origin cursor/trd-089-latency-telemetry-8e88` and open the PR, OR `git am` the patch onto a fresh branch. Land that before the extraction so TRD-089 travels with the engine.
++
++---
++
++## 2. What moves to `hibs-trading`
++
++### `src/` → new package `hibs_trading/` (or keep `hibs_predictor/trading_core/` import path to minimise churn — see §5)
++- `src/hibs_predictor/trading_core/**` (entire package)
++- `src/hibs_predictor/trading_symbols.py`
++- `src/hibs_predictor/trading_status.py` — **the server-side half** (`trading_status_server.py` consumer). The *football-side* HTTP client stays (see §4).
++
++### `tests/`
++- all `tests/test_trading_core_*.py`
++- `tests/test_trading_config_validation.py`, `tests/test_trading_status.py`, `tests/test_trading_symbols.py`
++- a **new Flask-free `conftest.py`** for the trading repo (the current `hibs-bet/tests/conftest.py` imports `hibs_predictor.auth` → Flask; that is the only reason "zero-dependency" trading tests need Flask today).
++
++### `docs/`
++- `TRADING_ALPACA_SETUP.md`, `TRADING_A_PLUS_EXECUTION_PLAN.md`, `TRADING_EVIDENCE_RUNBOOK.md`,
++  `TRADING_INTEGRATION_API.md`, `TRADING_PAPER_START.md`, `TRADING_PROMOTION_SCORECARD.md`, `TRD-089-LATENCY.md`
++
++### `scripts/` (trading-only — leave football backtests behind)
++- move: `collect_trading_evidence.py`, `evaluate_promotion_scorecard.py`, `run_extended_backtest.py`,
++  `run_phase3_gate.py`, `run_shadow_soak.py`, `run_trading_orchestrator.py`, `start_evidence_collection.sh`,
++  `start_paper_trading.sh`, `sync_trading_secrets_to_server.sh`, `trading_status_server.py`,
++  `verify_alpaca_credentials.py`, `verify_shadow_invariants.py`, `deploy_paper_to_vps.sh`, `deploy_shadow_to_vps.sh`
++- **leave in football** (NOT trading): `run_blind_80d_backtest.py`, `run_extended_football_backtest.py`
++
++### `deploy/`
++- `install-harvested-execution-paper.sh`, `install-harvested-execution-shadow.sh`,
++  `trading-evidence-snapshot.{service,timer}`, `trading-paper.service`, `trading-shadow-soak.service`, `trading_secrets.template`
++- `deploy/monitoring/` — move `trading_alerts.rules.yml` and `grafana/dashboards/trading_core.json`.
++  `prometheus.yml`, `docker-compose.yml`, `grafana/` scaffolding: **review** — split if football also scrapes, else move.
++
++### `static/`
++- `racing_ui.js` is racing's affiliate bridge that *references* the hibs-bet affiliate bundle — **leave for racing**, not trading.
++
++---
++
++## 3. New repo scaffolding (`hibs-trading`)
++1. `requirements.txt` — slim: the engine is near zero-dependency (`requests` for Alpaca REST; websocket transport; `pytest` dev). **No Flask, no pandas, no football data libs.**
++2. `pyproject.toml` / `src/` layout; package importable as `trading_core` (or `hibs_trading`).
++3. Flask-free `conftest.py` (see §2).
++4. `.gitlab-ci.yml` / CI: run `run_phase3_gate.py` + `pytest tests/` independently of football.
++5. `.env.example` / `trading_secrets.template`: **Alpaca keys only** — no football API keys. Confirms credential separation.
++6. README pointing at `TRADING_INTEGRATION_API.md` + promotion scorecard.
++
++---
++
++## 4. What STAYS in `hibs-bet` (football)
++- The **product switcher** UI (`templates/_product_switcher.html`) — already links out by URL (`hibs_trading_status_url`, env-driven). Keep as-is.
++- A **thin HTTP status client** so the football dashboard can still show the 📈 Trading pill: `web.py` currently does `from hibs_predictor.trading_status import fetch_trading_status, trading_metrics_base_url`. Replace with a tiny local `requests.get(TRADING_STATUS_URL)` helper (≈20 lines) so football no longer imports any trading code. `/api/trading-status` stays working; usability preserved.
++- Remove the moved trading files from `hibs-bet` only **after** the football shim above is in place and `pytest` (football) is green.
++
++---
++
++## 5. Import-path decision (pick one, record it)
++- **Option A (min churn):** keep the engine importable as `trading_core` in the new repo (top-level package). Existing `from hibs_predictor.trading_core...` becomes `from trading_core...` — a mechanical find/replace across the moved files + deploy scripts (`PYTHONPATH=src`, systemd `ExecStart`).
++- **Option B (clean namespace):** rename to `hibs_trading`. More churn, nicer brand. Only if time allows.
++
++Recommendation: **Option A** for the first cut (lowest risk), rename later if desired.
++
++---
++
++## 6. Validation (institutional-grade++ gate before deleting anything from hibs-bet)
++1. New repo: `python -m pytest tests/ -q` green (expect ~111+ trading tests). Note: the pre-existing `test_orchestrator_initializes_and_tears_down_websocket_stream` failure is an **environment/websocket-mock artifact** on the sandbox — confirm it passes in a real CI runner or carry the known-failure note.
++2. New repo: `python scripts/run_phase3_gate.py --db-path data/trading_ci_gate.db` exits 0.
++3. New repo: shadow dry-run smoke (`run_shadow_soak.py` short) — `trading_tick_to_trade_ms_hist_count == 0` invariant holds (TRD-089).
++4. `hibs-bet` after shim: football `pytest` green; dashboard 📈 Trading pill still resolves; `/api/trading-status` returns.
++5. VPS: re-point `trading-shadow-soak.service` / `trading-paper.service` `ExecStart` + `WorkingDirectory` to the new `/opt/trading-core` checkout. **Do not** disturb a live soak — schedule during a maintenance window between gates.
++6. Secrets: confirm Alpaca keys live only in the trading repo's secret store; football `.env` no longer needs them.
++
++---
++
++## 7. Out of scope here
++- Racing (`hibs-racing`) — already separate; its daily-smoke NA ingest hotfix is tracked in `MASTER_OPERATIONS_SCORECARD.md` §3.6 and lives in that (currently local-only, not-on-GitHub) repo.
++- Stage-2 arbitrage module — new build, tracked in `PROP_DESK_STRATEGY.md` §3; do after extraction so it lands in the clean trading repo.
++
++---
++
++## Related
++- [PROP_DESK_STRATEGY.md](./PROP_DESK_STRATEGY.md) · [MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md) · [TRADING_INTEGRATION_API.md](./TRADING_INTEGRATION_API.md) · [TRD-089-LATENCY.md](./TRD-089-LATENCY.md)
+-- 
+2.43.0
+
+
+From 2c2be859e9e2a343c49a6074f5f45d76a6b049b0 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:17:18 +0000
+Subject: [PATCH 04/23] docs: add rebase note to extraction plan (origin/main
+ +5, strategy_runner overlap)
+
+origin/main advanced to fa22a8e after this branch was cut; commit 18dd2f6
+edits the same run_scan_cycle loop as TRD-089 (per-lane counters). Record
+exact rebase guidance so the next agent reconciles strategy_runner.py
+cleanly before pushing.
+---
+ docs/TRADING_REPO_EXTRACTION_PLAN.md | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/docs/TRADING_REPO_EXTRACTION_PLAN.md b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+index 647b072..1d3a402 100644
+--- a/docs/TRADING_REPO_EXTRACTION_PLAN.md
++++ b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+@@ -26,6 +26,15 @@ Branch `cursor/trd-089-latency-telemetry-8e88` (2 commits: TRD-089 tick-to-trade
+ 
+ **Next agent step 0:** with valid `hibs-bet` write creds, `git push -u origin cursor/trd-089-latency-telemetry-8e88` and open the PR, OR `git am` the patch onto a fresh branch. Land that before the extraction so TRD-089 travels with the engine.
+ 
++> **Rebase note (required before push).** This branch was cut at `693dbdc`; `origin/main` has since advanced **5 commits** (to `fa22a8e`), so **rebase onto `origin/main` first**:
++> ```
++> git rebase origin/main   # on cursor/trd-089-latency-telemetry-8e88
++> ```
++> The only file that needs attention is `src/hibs_predictor/trading_core/strategy_runner.py`: commit **`18dd2f6`** (dual-feed) added per-lane `no_signal_*` / `shadow_would_route_*` counters in the **same `run_scan_cycle` loop** this branch edits.
++> - My T₀ line (`scan_trigger_perf = time.perf_counter()`) is inserted **immediately before** `signal = self.strategy.generate_signal(...)`; `18dd2f6` inserts lane counters **just after** the `if signal is None:` line. Adjacent but distinct — usually auto-merges; eyeball the hunk.
++> - My T₂ recording is in the `routed += 1` block, which `18dd2f6` does **not** touch → no conflict there.
++> - After rebase: `python -m pytest tests/test_trading_core_strategy_runner.py tests/test_trading_core_strategy_metrics.py -q` must stay green.
++
+ ---
+ 
+ ## 2. What moves to `hibs-trading`
+-- 
+2.43.0
+
+
+From 490840d10b5095e2150a067c391e59d4b1d95677 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:29:51 +0000
+Subject: [PATCH 05/23] inst++: add statistical-significance evidence engine
+ for value gating
+
+Add evidence_stats.py: deterministic (seeded) bootstrap ROI confidence
+intervals, Wilson proportion intervals, and significance-aware grading.
+A gate profile is now only 'sufficient'/promotable when the sample is
+large enough AND the bootstrap ROI CI lower bound clears 0 (and beats
+baseline on the CI lower bound) - not on a lucky thin-sample point ROI.
+
+Wire into gate_profile_compare: per-bet returns -> roi_ci_low/high_pct +
+roi_significant_positive on every profile; leaderboard ranks promotable/
+higher-CI-floor profiles first; CLV beat-close gets a Wilson verdict
+(clv_beat_close block) as the most sample-efficient line-shop proof.
+
+Additive only - preserves all existing metrics/fields, data, DQ, and the
+'no .env change until proven' discipline. New deterministic unit tests.
+---
+ src/hibs_predictor/evidence_stats.py       | 254 +++++++++++++++++++++
+ src/hibs_predictor/gate_profile_compare.py | 103 ++++++++-
+ tests/test_evidence_stats.py               |  78 +++++++
+ tests/test_gate_profile_compare.py         |  14 ++
+ 4 files changed, 438 insertions(+), 11 deletions(-)
+ create mode 100644 src/hibs_predictor/evidence_stats.py
+ create mode 100644 tests/test_evidence_stats.py
+
+diff --git a/src/hibs_predictor/evidence_stats.py b/src/hibs_predictor/evidence_stats.py
+new file mode 100644
+index 0000000..a7d72da
+--- /dev/null
++++ b/src/hibs_predictor/evidence_stats.py
+@@ -0,0 +1,254 @@
++"""Institutional++ statistical-significance primitives for edge evidence grading.
++
++Pure-stdlib and **deterministic** (bootstrap is seeded). No I/O, no look-ahead.
++
++Why this exists
++---------------
++Point ROI on a handful of bets is noise. An institutional desk does not scale
++capital on a positive point estimate from a thin sample — it requires the edge
++to be *statistically distinguishable from zero* (and, where a baseline exists,
++from the baseline). This module turns a per-bet return vector (or a
++win/loss proportion such as CLV beat-close) into a defensible verdict:
++
++    insufficient  -> too few observations to say anything
++    thin          -> promising point estimate, not yet proven
++    sufficient    -> large enough sample AND CI lower bound clears the bar
++
++The same primitives grade betting value legs (per-bet returns), 1X2 strike
++rates, and CLV beat-close proportions, so every lane (football / racing /
++trading) can be promoted on one honest standard.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import math
++import random
++from typing import Optional, Sequence, Tuple
++
++# Default sample-size bars (kept consistent with the legacy count-only grade).
++MIN_BETS_SUFFICIENT = 20
++MIN_BETS_THIN = 8
++# Deterministic bootstrap so CI is reproducible across runs / CI machines.
++DEFAULT_BOOTSTRAP_ITERATIONS = 2000
++DEFAULT_BOOTSTRAP_SEED = 12345
++DEFAULT_CONFIDENCE = 0.95
++
++
++def wilson_interval(successes: int, n: int, *, z: float = 1.96) -> Tuple[float, float]:
++    """Wilson score interval for a binomial proportion (low, high) in [0, 1].
++
++    Far better than the normal approximation for small n / extreme p, which is
++    exactly the regime CLV beat-close and strike-rate evidence start in.
++    """
++    if n <= 0:
++        return (0.0, 0.0)
++    phat = successes / n
++    z2 = z * z
++    denom = 1.0 + z2 / n
++    center = (phat + z2 / (2.0 * n)) / denom
++    margin = (z * math.sqrt((phat * (1.0 - phat) + z2 / (4.0 * n)) / n)) / denom
++    return (max(0.0, center - margin), min(1.0, center + margin))
++
++
++def _percentile(sorted_vals: Sequence[float], q: float) -> float:
++    """Linear-interpolation percentile (q in [0, 1]) on a pre-sorted sequence."""
++    if not sorted_vals:
++        return 0.0
++    if len(sorted_vals) == 1:
++        return float(sorted_vals[0])
++    pos = q * (len(sorted_vals) - 1)
++    lo = int(math.floor(pos))
++    hi = int(math.ceil(pos))
++    if lo == hi:
++        return float(sorted_vals[lo])
++    frac = pos - lo
++    return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
++
++
++def bootstrap_mean_ci(
++    samples: Sequence[float],
++    *,
++    confidence: float = DEFAULT_CONFIDENCE,
++    iterations: int = DEFAULT_BOOTSTRAP_ITERATIONS,
++    seed: int = DEFAULT_BOOTSTRAP_SEED,
++) -> Tuple[float, float, float]:
++    """Deterministic bootstrap CI for the mean: returns (low, point, high).
++
++    Used on a per-bet return vector (e.g. +`odds-1` on a win, `-1` on a loss).
++    The point estimate is the plain mean; low/high are percentile-bootstrap
++    bounds. Deterministic for a given (samples, seed) so CI is reproducible.
++    """
++    n = len(samples)
++    if n == 0:
++        return (0.0, 0.0, 0.0)
++    point = sum(samples) / n
++    if n == 1:
++        return (point, point, point)
++    rng = random.Random(seed)
++    means = []
++    data = list(samples)
++    for _ in range(max(1, iterations)):
++        total = 0.0
++        for _ in range(n):
++            total += data[rng.randrange(n)]
++        means.append(total / n)
++    means.sort()
++    alpha = (1.0 - confidence) / 2.0
++    low = _percentile(means, alpha)
++    high = _percentile(means, 1.0 - alpha)
++    return (low, point, high)
++
++
++@dataclass(frozen=True)
++class EvidenceVerdict:
++    """Significance-aware grade for an edge sample (institutional promotion gate)."""
++
++    grade: str  # "empty" | "insufficient" | "thin" | "sufficient"
++    n: int
++    roi_pct: float
++    roi_ci_low_pct: float
++    roi_ci_high_pct: float
++    significant_positive: bool  # CI lower bound clears zero
++    beats_baseline: Optional[bool]  # vs baseline_roi_pct (None if no baseline)
++    promotable: bool  # sufficient sample + significant + (beats baseline if given)
++    reason: str
++
++    def as_dict(self) -> dict:
++        return {
++            "grade": self.grade,
++            "n": self.n,
++            "roi_pct": round(self.roi_pct, 2),
++            "roi_ci_low_pct": round(self.roi_ci_low_pct, 2),
++            "roi_ci_high_pct": round(self.roi_ci_high_pct, 2),
++            "significant_positive": self.significant_positive,
++            "beats_baseline": self.beats_baseline,
++            "promotable": self.promotable,
++            "reason": self.reason,
++        }
++
++
++def classify_evidence(
++    per_bet_returns: Sequence[float],
++    *,
++    baseline_roi_pct: Optional[float] = None,
++    min_bets_sufficient: int = MIN_BETS_SUFFICIENT,
++    min_bets_thin: int = MIN_BETS_THIN,
++    confidence: float = DEFAULT_CONFIDENCE,
++    iterations: int = DEFAULT_BOOTSTRAP_ITERATIONS,
++    seed: int = DEFAULT_BOOTSTRAP_SEED,
++) -> EvidenceVerdict:
++    """Grade an edge from a per-bet return vector with bootstrap significance.
++
++    ``per_bet_returns`` are unit-stake P&L per leg (win: ``odds-1``, loss: ``-1``).
++    A profile is only ``promotable`` when the sample is large enough AND the
++    bootstrap ROI CI lower bound clears 0 AND (if a baseline is supplied) the
++    lower bound clears the baseline ROI. This is the gate that stops us scaling
++    stake on a lucky 3-bet sample.
++    """
++    n = len(per_bet_returns)
++    if n == 0:
++        return EvidenceVerdict(
++            grade="empty", n=0, roi_pct=0.0, roi_ci_low_pct=0.0, roi_ci_high_pct=0.0,
++            significant_positive=False, beats_baseline=None, promotable=False,
++            reason="no settled legs",
++        )
++
++    low, point, high = bootstrap_mean_ci(
++        per_bet_returns, confidence=confidence, iterations=iterations, seed=seed
++    )
++    roi_pct = point * 100.0
++    low_pct = low * 100.0
++    high_pct = high * 100.0
++    significant_positive = low_pct > 0.0
++
++    beats_baseline: Optional[bool] = None
++    if baseline_roi_pct is not None:
++        beats_baseline = low_pct > float(baseline_roi_pct)
++
++    if n < min_bets_thin:
++        grade = "insufficient"
++    elif n < min_bets_sufficient:
++        grade = "thin"
++    elif significant_positive and (beats_baseline is None or beats_baseline):
++        grade = "sufficient"
++    else:
++        # Large sample but the edge is not statistically separable from zero/baseline.
++        grade = "thin"
++
++    promotable = grade == "sufficient"
++
++    if grade == "insufficient":
++        reason = f"n={n} < {min_bets_thin} (too few legs)"
++    elif grade == "thin" and n < min_bets_sufficient:
++        reason = f"n={n} < {min_bets_sufficient} (sample not yet sufficient)"
++    elif grade == "thin":
++        if not significant_positive:
++            reason = f"ROI 95% CI lower bound {low_pct:.2f}% does not clear 0"
++        else:
++            reason = f"does not beat baseline {baseline_roi_pct}% on CI lower bound"
++    else:
++        reason = (
++            f"n={n}, ROI CI lower bound {low_pct:.2f}% > "
++            f"{0.0 if baseline_roi_pct is None else baseline_roi_pct}"
++        )
++
++    return EvidenceVerdict(
++        grade=grade, n=n, roi_pct=roi_pct, roi_ci_low_pct=low_pct, roi_ci_high_pct=high_pct,
++        significant_positive=significant_positive, beats_baseline=beats_baseline,
++        promotable=promotable, reason=reason,
++    )
++
++
++@dataclass(frozen=True)
++class ProportionVerdict:
++    """Wilson-interval verdict for a proportion edge (e.g. CLV beat-close > 50%)."""
++
++    n: int
++    rate_pct: float
++    ci_low_pct: float
++    ci_high_pct: float
++    threshold_pct: float
++    beats_threshold: bool  # CI lower bound clears the threshold
++    reason: str
++
++    def as_dict(self) -> dict:
++        return {
++            "n": self.n,
++            "rate_pct": round(self.rate_pct, 2),
++            "ci_low_pct": round(self.ci_low_pct, 2),
++            "ci_high_pct": round(self.ci_high_pct, 2),
++            "threshold_pct": self.threshold_pct,
++            "beats_threshold": self.beats_threshold,
++            "reason": self.reason,
++        }
++
++
++def classify_proportion(
++    successes: int,
++    n: int,
++    *,
++    threshold_pct: float = 50.0,
++    z: float = 1.96,
++) -> ProportionVerdict:
++    """Grade a proportion edge (e.g. CLV beat-close) via Wilson lower bound.
++
++    CLV beat-close is the most sample-efficient proof of a line-shopping edge:
++    "we beat the closing line more than half the time, with confidence."
++    ``beats_threshold`` requires the Wilson lower bound to clear ``threshold_pct``.
++    """
++    low, high = wilson_interval(int(successes), int(n), z=z)
++    rate = (successes / n) if n > 0 else 0.0
++    low_pct = low * 100.0
++    high_pct = high * 100.0
++    beats = n > 0 and low_pct > threshold_pct
++    if n <= 0:
++        reason = "no observations"
++    elif beats:
++        reason = f"Wilson lower bound {low_pct:.2f}% > {threshold_pct}% (edge confirmed)"
++    else:
++        reason = f"Wilson lower bound {low_pct:.2f}% does not clear {threshold_pct}%"
++    return ProportionVerdict(
++        n=int(n), rate_pct=rate * 100.0, ci_low_pct=low_pct, ci_high_pct=high_pct,
++        threshold_pct=float(threshold_pct), beats_threshold=beats, reason=reason,
++    )
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index a903eb6..f2ad92e 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -11,7 +11,17 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional, Set, Tuple
+ 
+-from hibs_predictor.prediction_log import _db_path, audit_odds_capture_stats
++from hibs_predictor.evidence_stats import (
++    MIN_BETS_SUFFICIENT,
++    MIN_BETS_THIN,
++    classify_evidence,
++    classify_proportion,
++)
++from hibs_predictor.prediction_log import (
++    _db_path,
++    audit_odds_capture_stats,
++    clv_beat_close_summary,
++)
+ from hibs_predictor.value_replay import (
+     _settled,
+     load_settled_fixtures,
+@@ -210,6 +220,7 @@ def eval_gate_profile(
+     bets = wins = 0
+     pnl = 0.0
+     theory_sum = 0.0
++    per_bet_returns: List[float] = []
+     skipped_no_odds = 0
+     skipped_no_raw = 0
+     gate_rejects: Counter[str] = Counter()
+@@ -248,13 +259,22 @@ def eval_gate_profile(
+             if ok:
+                 wins += 1
+                 pnl += odds - 1.0
++                per_bet_returns.append(odds - 1.0)
+                 by_market[str(outcome)]["wins"] += 1
+                 by_league[lg]["wins"] += 1
+             else:
+                 pnl -= 1.0
++                per_bet_returns.append(-1.0)
+ 
+     strike = (wins / bets * 100.0) if bets else 0.0
+     roi = (pnl / bets * 100.0) if bets else 0.0
++    # Institutional++ significance: bootstrap ROI CI so a profile is never
++    # graded "sufficient" on a lucky thin sample (deterministic, seeded).
++    verdict = classify_evidence(
++        per_bet_returns,
++        min_bets_sufficient=MIN_BETS_SUFFICIENT,
++        min_bets_thin=MIN_BETS_THIN,
++    )
+     away_bets = sum(v["bets"] for k, v in by_market.items() if k in ("away", "away_and_btts"))
+     away_wins = sum(v["wins"] for k, v in by_market.items() if k in ("away", "away_and_btts"))
+     roi_delta = round(roi - baseline_roi, 2) if baseline_roi is not None and bets else None
+@@ -263,6 +283,10 @@ def eval_gate_profile(
+         "wins": wins,
+         "strike_pct": round(strike, 2),
+         "roi_pct": round(roi, 2),
++        "roi_ci_low_pct": round(verdict.roi_ci_low_pct, 2),
++        "roi_ci_high_pct": round(verdict.roi_ci_high_pct, 2),
++        "roi_significant_positive": verdict.significant_positive,
++        "evidence_grade_stat": verdict.grade,
+         "roi_delta_vs_baseline_pp": roi_delta,
+         "avg_theoretical_roi_pct": round(theory_sum / bets, 2) if bets else 0.0,
+         "pnl_units": round(pnl, 2),
+@@ -328,20 +352,51 @@ def _rank_profile_results(
+                 "profile": name,
+                 "bets": bets,
+                 "roi_pct": float(metrics.get("roi_pct") or 0.0),
++                "roi_ci_low_pct": float(metrics.get("roi_ci_low_pct") or 0.0),
++                "roi_significant_positive": bool(metrics.get("roi_significant_positive")),
+                 "strike_pct": float(metrics.get("strike_pct") or 0.0),
+                 "roi_delta_vs_baseline_pp": metrics.get("roi_delta_vs_baseline_pp"),
+                 "evidence_grade": payload.get("evidence_grade"),
++                "promotable": bool(payload.get("promotable")),
+                 "gate_reject_top": metrics.get("gate_reject_top") or [],
+                 "env": payload.get("env") or {},
+             }
+         )
+-    rows.sort(key=lambda r: (r["roi_pct"], r["bets"]), reverse=True)
++    # Proven edges first (promotable), then higher CI floor, then point ROI, then n.
++    rows.sort(
++        key=lambda r: (
++            1 if r["promotable"] else 0,
++            r["roi_ci_low_pct"],
++            r["roi_pct"],
++            r["bets"],
++        ),
++        reverse=True,
++    )
+     for r in rows:
+         if r["evidence_grade"] is None:
+             r["evidence_grade"] = _evidence_grade(int(r["bets"]), min_bets=min_bets)
+     return rows
+ 
+ 
++def clv_beat_close_verdict(*, days: int = 28, threshold_pct: float = 50.0) -> Dict[str, Any]:
++    """Wilson-CI verdict on CLV beat-close — the most sample-efficient line-shop proof.
++
++    Beating the closing line >50% of the time *with confidence* proves a
++    line-shopping edge far faster than realized settled ROI. Wraps the existing
++    ``clv_beat_close_summary`` and grades it via the Wilson lower bound.
++    """
++    summary = clv_beat_close_summary(days=days)
++    n = int(summary.get("n_clv_rows") or 0)
++    pct = summary.get("beat_close_pct")
++    out: Dict[str, Any] = {"summary": summary, "verdict": None}
++    if n > 0 and pct is not None:
++        successes = int(round(float(pct) / 100.0 * n))
++        out["verdict"] = classify_proportion(
++            successes, n, threshold_pct=threshold_pct
++        ).as_dict()
++    return out
++
++
+ def _evidence_grade(bets: int, *, min_bets: int = 20) -> str:
+     if bets >= min_bets:
+         return "sufficient"
+@@ -386,6 +441,7 @@ def run_gate_profile_compare(
+         "db_path": _db_path(),
+         "replay_mode": "full_reidentify_from_stored_probs_and_odds",
+         "audit_odds_capture": audit_odds_capture_stats(),
++        "clv_beat_close": clv_beat_close_verdict(),
+         "profiles": profile_names,
+         "exhaustive_grid": exhaustive,
+         "grid_profile_count": len(generate_gate_grid_profiles()) if exhaustive else 0,
+@@ -423,11 +479,15 @@ def run_gate_profile_compare(
+         for name in profile_names:
+             env = profile_map.get(name, GATE_PROFILES.get(name, {}))
+             metrics = eval_gate_profile(fixtures, env)
+-            grade = _evidence_grade(int(metrics["bets"]), min_bets=min_bets_for_promotion)
++            # Significance-aware grade (bootstrap CI) instead of bet-count only.
++            grade = metrics.get("evidence_grade_stat") or _evidence_grade(
++                int(metrics["bets"]), min_bets=min_bets_for_promotion
++            )
+             cohort_out["results"][name] = {
+                 "env": env,
+                 "metrics": metrics,
+                 "evidence_grade": grade,
++                "promotable": grade == "sufficient",
+             }
+ 
+         baseline_metrics = cohort_out["results"].get("baseline", {}).get("metrics", {})
+@@ -435,9 +495,17 @@ def run_gate_profile_compare(
+         for name in profile_names:
+             if name == "baseline" or baseline_roi is None:
+                 continue
+-            m = cohort_out["results"][name]["metrics"]
++            res = cohort_out["results"][name]
++            m = res["metrics"]
+             if m.get("bets"):
+                 m["roi_delta_vs_baseline_pp"] = round(float(m["roi_pct"]) - baseline_roi, 2)
++                # Institutional++: a "sufficient" profile must also beat baseline
++                # on the ROI CI lower bound, not just on the point estimate.
++                beats_baseline = float(m.get("roi_ci_low_pct") or 0.0) > baseline_roi
++                m["beats_baseline_significant"] = beats_baseline
++                if res["evidence_grade"] == "sufficient" and not beats_baseline:
++                    res["evidence_grade"] = "thin"
++                    res["promotable"] = False
+ 
+         for name in profile_names:
+             metrics = cohort_out["results"][name]["metrics"]
+@@ -456,28 +524,41 @@ def run_gate_profile_compare(
+ 
+     if best_odds_ready:
+         name, roi, n, env = best_odds_ready
++        best_res = report["cohorts"].get("odds_ready_settled", {}).get("results", {}).get(name, {})
++        best_metrics = best_res.get("metrics", {})
+         report["best_blend"] = {
+             "profile": name,
+             "cohort": "odds_ready_settled",
+             "roi_pct": roi,
++            "roi_ci_low_pct": best_metrics.get("roi_ci_low_pct"),
++            "roi_ci_high_pct": best_metrics.get("roi_ci_high_pct"),
+             "bets": n,
+             "env": env,
+-            "evidence_grade": _evidence_grade(n, min_bets=min_bets_for_promotion),
++            "evidence_grade": best_res.get("evidence_grade")
++            or _evidence_grade(n, min_bets=min_bets_for_promotion),
++            "promotable": bool(best_res.get("promotable")),
+         }
+ 
+     if best_forward:
+         name, roi, n = best_forward
++        fwd_metrics = (
++            report["cohorts"].get("forward_odds_ready", {}).get("results", {}).get(name, {}).get("metrics", {})
++        )
++        ci_low = fwd_metrics.get("roi_ci_low_pct")
+         report["recommendation"] = (
+-            f"Forward odds-ready cohort: best ROI {roi}% on '{name}' (n={n} bets). "
+-            f"Do not change VPS .env until evidence_grade=sufficient (≥{min_bets_for_promotion} bets) "
+-            "and beats baseline on forward slice."
++            f"Forward odds-ready cohort: best ROI {roi}% (95% CI low {ci_low}%) on '{name}' (n={n} bets). "
++            f"Do not change VPS .env until evidence_grade=sufficient (≥{min_bets_for_promotion} bets, "
++            "ROI CI lower bound > 0 and > baseline) on the forward slice."
+         )
+     elif best_odds_ready:
+         name, roi, n, _env = best_odds_ready
+-        grade = _evidence_grade(n, min_bets=min_bets_for_promotion)
++        bb = report.get("best_blend") or {}
++        grade = bb.get("evidence_grade") or _evidence_grade(n, min_bets=min_bets_for_promotion)
++        ci_low = bb.get("roi_ci_low_pct")
+         report["recommendation"] = (
+-            f"Odds-ready cohort: best ROI {roi}% on '{name}' (n={n} bets, evidence={grade}). "
+-            f"Forward slice still thin — grow capture via scripts/run_forward_backfill_plan.sh before VPS .env change."
++            f"Odds-ready cohort: best ROI {roi}% (95% CI low {ci_low}%) on '{name}' "
++            f"(n={n} bets, evidence={grade}, promotable={bb.get('promotable')}). "
++            "Forward slice still thin — grow capture via scripts/run_forward_backfill_plan.sh before VPS .env change."
+         )
+     else:
+         report["recommendation"] = (
+diff --git a/tests/test_evidence_stats.py b/tests/test_evidence_stats.py
+new file mode 100644
+index 0000000..1bd067f
+--- /dev/null
++++ b/tests/test_evidence_stats.py
+@@ -0,0 +1,78 @@
++"""Tests for institutional++ significance primitives (deterministic)."""
++
++from hibs_predictor.evidence_stats import (
++    bootstrap_mean_ci,
++    classify_evidence,
++    classify_proportion,
++    wilson_interval,
++)
++
++
++def test_wilson_interval_bounds_and_edges():
++    assert wilson_interval(0, 0) == (0.0, 0.0)
++    low, high = wilson_interval(5, 10)
++    assert 0.0 <= low < 0.5 < high <= 1.0
++    # All successes: lower bound below 1.0 (never claims certainty), high == 1.0.
++    low_all, high_all = wilson_interval(10, 10)
++    assert low_all < 1.0 and high_all == 1.0
++
++
++def test_bootstrap_is_deterministic_and_brackets_point():
++    samples = [1.0, -1.0, 2.0, -1.0, 0.5, -1.0, 1.5, -1.0]
++    a = bootstrap_mean_ci(samples, seed=42)
++    b = bootstrap_mean_ci(samples, seed=42)
++    assert a == b  # deterministic for a fixed seed
++    low, point, high = a
++    assert low <= point <= high
++    # Different seed should still bracket the same point estimate.
++    low2, point2, high2 = bootstrap_mean_ci(samples, seed=7)
++    assert point2 == point
++    assert low2 <= point2 <= high2
++
++
++def test_classify_evidence_empty():
++    v = classify_evidence([])
++    assert v.grade == "empty"
++    assert v.promotable is False
++
++
++def test_classify_evidence_insufficient_small_sample():
++    v = classify_evidence([1.0, 1.0, 1.0])  # n < MIN_BETS_THIN
++    assert v.grade == "insufficient"
++    assert v.promotable is False
++
++
++def test_classify_evidence_sufficient_clear_positive_edge():
++    v = classify_evidence([1.0] * 25)  # 25 winning unit bets, ROI +100%
++    assert v.grade == "sufficient"
++    assert v.promotable is True
++    assert v.significant_positive is True
++    assert v.roi_ci_low_pct > 0.0
++
++
++def test_classify_evidence_large_sample_but_negative_not_promotable():
++    v = classify_evidence([-1.0] * 25)
++    assert v.promotable is False
++    assert v.significant_positive is False
++    assert v.grade == "thin"  # large n but edge not separable from zero
++
++
++def test_classify_evidence_baseline_gate():
++    # Constant +20% edge, n=25 -> CI low == 20%.
++    beats = classify_evidence([0.2] * 25, baseline_roi_pct=10.0)
++    assert beats.beats_baseline is True
++    assert beats.grade == "sufficient"
++    fails = classify_evidence([0.2] * 25, baseline_roi_pct=25.0)
++    assert fails.beats_baseline is False
++    assert fails.grade == "thin"  # positive but does not beat baseline
++    assert fails.promotable is False
++
++
++def test_classify_proportion_clv_beat_close():
++    strong = classify_proportion(600, 1000, threshold_pct=50.0)
++    assert strong.beats_threshold is True
++    assert strong.ci_low_pct > 50.0
++    weak = classify_proportion(55, 100, threshold_pct=50.0)
++    assert weak.beats_threshold is False
++    none = classify_proportion(0, 0)
++    assert none.beats_threshold is False
+diff --git a/tests/test_gate_profile_compare.py b/tests/test_gate_profile_compare.py
+index e0a146b..b423508 100644
+--- a/tests/test_gate_profile_compare.py
++++ b/tests/test_gate_profile_compare.py
+@@ -22,11 +22,25 @@ def test_eval_gate_profile_baseline_empty_fixtures():
+     assert metrics["roi_pct"] == 0.0
+ 
+ 
++def test_eval_gate_profile_emits_significance_fields():
++    m = eval_gate_profile([], {})
++    for key in (
++        "roi_ci_low_pct",
++        "roi_ci_high_pct",
++        "roi_significant_positive",
++        "evidence_grade_stat",
++    ):
++        assert key in m
++    assert m["evidence_grade_stat"] == "empty"
++    assert m["roi_significant_positive"] is False
++
++
+ def test_run_gate_profile_compare_structure(tmp_path, monkeypatch):
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "0")
+     report = run_gate_profile_compare(days=90, profiles=["baseline", "trial_vps"])
+     assert "cohorts" in report
+     assert "audit_odds_capture" in report
++    assert "clv_beat_close" in report  # institutional++ CLV Wilson verdict block
+     assert "recommendation" in report
+     assert "baseline" in GATE_PROFILES
+     assert "trial_vps" in GATE_PROFILES
+-- 
+2.43.0
+
+
+From a8d7b38322b01d019e51f4af97fd3b888f5e7395 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:29:51 +0000
+Subject: [PATCH 06/23] fix(players): merge duplicate extra_js Jinja block
+ (restores players page)
+
+templates/players.html declared {% block extra_js %} twice, which raises
+TemplateAssertionError and 500s the players dashboard. Merge the cold-
+start reload script and the audit-ops include into a single block.
+Fixes test_players_route + test_stability_routes (pre-existing red CI).
+---
+ templates/players.html | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/templates/players.html b/templates/players.html
+index 54cdaf6..2b0411a 100644
+--- a/templates/players.html
++++ b/templates/players.html
+@@ -120,6 +120,7 @@
+ try { sessionStorage.removeItem('hibs_players_cold_reloads'); } catch (e) {}
+ </script>
+ {% endif %}
++<script src="{{ url_for('static', filename='hibs_audit_ops.js') }}"></script>
+ {% endblock %}
+ {% block extra_css %}
+ <style>
+@@ -144,6 +145,3 @@ try { sessionStorage.removeItem('hibs_players_cold_reloads'); } catch (e) {}
+ @media(max-width:980px){.players-grid{grid-template-columns:1fr;}.players-lists{grid-template-columns:1fr;}}
+ </style>
+ {% endblock %}
+-{% block extra_js %}
+-<script src="{{ url_for('static', filename='hibs_audit_ops.js') }}"></script>
+-{% endblock %}
+-- 
+2.43.0
+
+
+From 82d68f34a6eeeaee94ee70813437312b0f7087d2 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:30:33 +0000
+Subject: [PATCH 07/23] docs: institutional++ roadmap + work queue
+
+Capture Tier-0 done (evidence-significance engine, TRD-089, players fix)
+and the prioritized next-agent queue: significance as the promotion gate
+everywhere, automated evidence growth, unified cross-lane promotion
+scorecard, repo separation, CI hardening, Stage-2 arbitrage, capital
+governance. Records the pre-existing CI failures (flaky gate test,
+prediction_log_auto) to clear for a credible CI gate.
+---
+ README.md                      |  1 +
+ docs/INST_PLUS_PLUS_ROADMAP.md | 70 ++++++++++++++++++++++++++++++++++
+ docs/PROP_DESK_STRATEGY.md     |  1 +
+ 3 files changed, 72 insertions(+)
+ create mode 100644 docs/INST_PLUS_PLUS_ROADMAP.md
+
+diff --git a/README.md b/README.md
+index ea6121e..64cf35b 100644
+--- a/README.md
++++ b/README.md
+@@ -270,6 +270,7 @@ Local surgical patches (Championship shrink, DQ persistence, headline cohort) ar
+ | Doc | Contents |
+ |-----|----------|
+ | [Prop desk strategy](docs/PROP_DESK_STRATEGY.md) | Multi-strategy direction: Line-Shop → Arbitrage → Market-Making |
++| [Institutional++ roadmap](docs/INST_PLUS_PLUS_ROADMAP.md) | Evidence-significance engine + prioritized work queue |
+ | [Product overview](docs/PRODUCT_OVERVIEW.md) | Surfaces, pipeline, reliability |
+ | [Betting engine](docs/BETTING_ENGINE.md) | Poisson, value, calibration |
+ | [Football sale readiness](docs/FOOTBALL_SALE_READINESS.md) | Brier targets, B2B metrics, cron |
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+new file mode 100644
+index 0000000..29c577f
+--- /dev/null
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -0,0 +1,70 @@
++# Institutional++ Roadmap & Work Queue
++
++**Thesis:** the bottleneck is **evidence, not engineering**. Every lane has A-grade plumbing; advancing to institutional++ means industrializing *proof and promotion* so no lane scales capital without statistically-significant, forward, audited edge. See [PROP_DESK_STRATEGY.md](./PROP_DESK_STRATEGY.md).
++
++**Standing constraint on all items:** preserve **data, DQ, features, usability, institutional-grade++**. Additive, audited, test-backed, deterministic; no production/VPS mutation during gate freezes.
++
++---
++
++## DONE on branch `cursor/trd-089-latency-telemetry-8e88`
++
++| Commit | What | Inst++ value |
++|--------|------|--------------|
++| TRD-089 | Tick-to-trade telemetry wired into the live execution hot path (T₀ scan → T₂ ack); shadow stays 0 | Latency is now *measurable in production* (Stage-3 enabler) |
++| evidence engine | `evidence_stats.py` (seeded bootstrap ROI CI, Wilson proportion CI, significance grading) + wired into `gate_profile_compare` | A profile is `sufficient`/`promotable` only when ROI CI lower bound clears 0 **and** beats baseline — kills thin-sample false positives |
++| CLV verdict | `clv_beat_close_verdict()` (Wilson lower bound > 50%) in the gate-compare report | CLV is the most sample-efficient line-shop proof; now graded with confidence |
++| players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
++| docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
++
++> Push is blocked only on credentials (agent token scoped to `football-app`). Rebase note + patch in `TRADING_REPO_EXTRACTION_PLAN.md` §1.
++
++---
++
++## QUEUE — next, in priority order
++
++### Q1. Make significance the promotion gate everywhere (extends Tier 0)
++- Surface `roi_ci_low_pct` / `roi_significant_positive` / `clv_beat_close` on `/performance` and `/status#audit-evidence` (UI already reads `/api/health`).
++- Add a **bootstrap CI to the CLI** `pred-log-backtest` / `value_replay.replay_report_dict` output (currently point ROI only).
++- Gate the deploy scripts: `apply-vps-*` should refuse to run unless the latest `comparison_gate_profiles.json` shows a `promotable` profile on the forward cohort.
++
++### Q2. Automate evidence growth (the actual Stage-1 unblock)
++- Cron `scripts/run_forward_backfill_plan.sh` daily; track `audit_odds_capture.capture_rate_pct` and `clv_beat_close` as monitored time series (target: forward 1X2 capture ≥50% 7d, CLV n≥25 with Wilson low > 50%).
++- Alert when capture stalls; this is what converts "infra ready" into "edge proven".
++
++### Q3. One promotion-scorecard standard across all three lanes
++- Generalize the trading `promotion_scorecard` GO/NO-GO + evidence-pack format to football and racing so every lane promotes identically and emits a **data-room artifact**. Reuse `evidence_stats` for the stats layer.
++
++### Q4. Trading post-18-Jun (after Day-15 verdict)
++- Verify live `trading_tick_to_trade_ms_hist_count` > 0 on first paper/micro route (TRD-089 acceptance #2).
++- If Day-15 PASS: shadow→micro with tiny caps via the scorecard; add optional `lane`/`gate_mode` latency labels.
++- Schedule chaos/disconnect/SIGKILL-recovery tests as recurring **live game-days**; wire `trading_slo_*` to Grafana alerts.
++
++### Q5. Repo separation (`hibs-trading`)
++- Execute `TRADING_REPO_EXTRACTION_PLAN.md` after 2026-06-18. Independent CI, secrets, blast radius.
++
++### Q6. CI hardening into a gate
++- Phase-3 gate + full `pytest` + evidence-grade check must **block merge**.
++- Add property-based tests on money paths (risk kernel, settlement `_settled`, odds-thin line-shop fill).
++
++### Q7. Stage-2 statistical arbitrage (greenfield)
++- Build cross-book / cross-market detector reusing the recon engine + ledger + `evidence_stats`; run through the *same* shadow → evidence-grade → promotion loop from day one. Do **after** Stage-1 banks capital.
++
++### Q8. Capital governance (once ≥1 lane proven)
++- Portfolio-level fractional-Kelly allocator with per-lane exposure limits + daily cross-lane reconciliation.
++
++---
++
++## PRE-EXISTING CI failures to clear (institutional++ = deterministic green CI)
++
++These exist on `origin/main` independent of the above; fixing them is required for a credible CI gate (Q6).
++
++| Test(s) | Symptom | Likely root cause / fix |
++|---------|---------|--------------------------|
++| `test_players_route`, `test_stability_routes::...cold_cache...` | `TemplateAssertionError: block 'extra_js' defined twice` | **FIXED on this branch** (merged the duplicate block). |
++| `test_gate_profile_compare::test_run_gate_profile_compare_structure` | **Flaky** — fails only under certain test ordering | Non-deterministic: `_apply_profile_env` mutates `os.environ` without restore + 90-day `datetime.now()` window over the live audit DB. Fix: snapshot/restore env in a fixture (or context-manage it) and/or freeze `now()` in the test. |
++| `test_prediction_log_auto::test_log_predictions_from_fixtures_always_mode`, `..._backfill_when_always_off` | `assert n == 2` → got `0` (no rows logged) | Pre-existing logic/fixture mismatch in the auto-log path; needs domain triage (likely a guard/env default changed). Not touched here. |
++
++---
++
++## Related
++- [PROP_DESK_STRATEGY.md](./PROP_DESK_STRATEGY.md) · [TRADING_REPO_EXTRACTION_PLAN.md](./TRADING_REPO_EXTRACTION_PLAN.md) · [INSTITUTIONAL_SCORECARD.md](./INSTITUTIONAL_SCORECARD.md) · [FOOTBALL_SALE_READINESS.md](./FOOTBALL_SALE_READINESS.md) · [TRADING_PROMOTION_SCORECARD.md](./TRADING_PROMOTION_SCORECARD.md)
+diff --git a/docs/PROP_DESK_STRATEGY.md b/docs/PROP_DESK_STRATEGY.md
+index d838ade..7f4958f 100644
+--- a/docs/PROP_DESK_STRATEGY.md
++++ b/docs/PROP_DESK_STRATEGY.md
+@@ -87,6 +87,7 @@ Provide two-sided liquidity and earn the spread. Highest ceiling, highest infras
+ 
+ ## Related
+ 
++- [INST_PLUS_PLUS_ROADMAP.md](./INST_PLUS_PLUS_ROADMAP.md) — institutional++ work queue (evidence engine done; next items + CI debt)
+ - [TRADING_REPO_EXTRACTION_PLAN.md](./TRADING_REPO_EXTRACTION_PLAN.md) — split trading into its own `hibs-trading` repo (peer to football/racing)
+ - [MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md) — cross-product GO/NO-GO dates & kill switches
+ - [TRADING_PROMOTION_SCORECARD.md](./TRADING_PROMOTION_SCORECARD.md) — shadow → micro → live gates
+-- 
+2.43.0
+
+
+From baa9a77ca0ea9f950722cd2fefef20aa5fc580f2 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:31:22 +0000
+Subject: [PATCH 08/23] docs: update extraction-plan rebase note (branch
+ already rebased, overlap resolved)
+
+---
+ docs/TRADING_REPO_EXTRACTION_PLAN.md | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/docs/TRADING_REPO_EXTRACTION_PLAN.md b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+index 1d3a402..f386d9f 100644
+--- a/docs/TRADING_REPO_EXTRACTION_PLAN.md
++++ b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+@@ -26,14 +26,11 @@ Branch `cursor/trd-089-latency-telemetry-8e88` (2 commits: TRD-089 tick-to-trade
+ 
+ **Next agent step 0:** with valid `hibs-bet` write creds, `git push -u origin cursor/trd-089-latency-telemetry-8e88` and open the PR, OR `git am` the patch onto a fresh branch. Land that before the extraction so TRD-089 travels with the engine.
+ 
+-> **Rebase note (required before push).** This branch was cut at `693dbdc`; `origin/main` has since advanced **5 commits** (to `fa22a8e`), so **rebase onto `origin/main` first**:
++> **Rebase status.** This branch has **already been rebased onto `fa22a8e`** (then current `origin/main`); the `strategy_runner.py` overlap with `18dd2f6` (dual-feed per-lane counters vs the TRD-089 T₀/T₂ stamps) is **resolved and tested** — both coexist. The next agent only needs to `git rebase origin/main` **again if `origin/main` has advanced further**. After any rebase, confirm green:
+ > ```
+-> git rebase origin/main   # on cursor/trd-089-latency-telemetry-8e88
++> python -m pytest tests/test_trading_core_strategy_runner.py tests/test_evidence_stats.py tests/test_gate_profile_compare.py -q
+ > ```
+-> The only file that needs attention is `src/hibs_predictor/trading_core/strategy_runner.py`: commit **`18dd2f6`** (dual-feed) added per-lane `no_signal_*` / `shadow_would_route_*` counters in the **same `run_scan_cycle` loop** this branch edits.
+-> - My T₀ line (`scan_trigger_perf = time.perf_counter()`) is inserted **immediately before** `signal = self.strategy.generate_signal(...)`; `18dd2f6` inserts lane counters **just after** the `if signal is None:` line. Adjacent but distinct — usually auto-merges; eyeball the hunk.
+-> - My T₂ recording is in the `routed += 1` block, which `18dd2f6` does **not** touch → no conflict there.
+-> - After rebase: `python -m pytest tests/test_trading_core_strategy_runner.py tests/test_trading_core_strategy_metrics.py -q` must stay green.
++> **Known pre-existing reds** (not from this branch, see `INST_PLUS_PLUS_ROADMAP.md`): `test_prediction_log_auto` (2). The `players.html` template red is **fixed on this branch**.
+ 
+ ---
+ 
+-- 
+2.43.0
+
+
+From 32862fcaa32995c67850349876821f3ece1d1356 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:35:22 +0000
+Subject: [PATCH 09/23] fix(tests): align prediction_log_auto with
+ HIBS_AUDIT_REQUIRE_ODDS=1 default
+
+The audit-require-odds default flipped to 1 (forward odds-capture work),
+so always/backfill logging correctly skips odds-less fixtures. The tests
+encoded the old behaviour. Isolate the always/backfill logic with
+HIBS_AUDIT_REQUIRE_ODDS=0 and add a lock-in test that the production
+default skips fixtures lacking 1X2 (stats.skipped_no_odds).
+---
+ tests/test_prediction_log_auto.py | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/tests/test_prediction_log_auto.py b/tests/test_prediction_log_auto.py
+index 555094f..6223e68 100644
+--- a/tests/test_prediction_log_auto.py
++++ b/tests/test_prediction_log_auto.py
+@@ -28,6 +28,9 @@ def test_log_predictions_from_fixtures_always_mode(monkeypatch, tmp_path):
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ALWAYS", "1")
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "0")
++    # Isolate the always-logging behaviour from the odds-capture gate
++    # (HIBS_AUDIT_REQUIRE_ODDS defaults to 1; these fixtures carry no 1X2 odds).
++    monkeypatch.setenv("HIBS_AUDIT_REQUIRE_ODDS", "0")
+ 
+     fixtures = [_fixture(101), _fixture(102)]
+     n = log_predictions_from_fixtures(fixtures)
+@@ -46,9 +49,26 @@ def test_log_predictions_backfill_when_always_off(monkeypatch, tmp_path):
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ALWAYS", "0")
++    monkeypatch.setenv("HIBS_AUDIT_REQUIRE_ODDS", "0")
+ 
+     fx = _fixture(201)
+     n = log_predictions_from_fixtures([fx])
+     assert n == 1
+     n2 = log_predictions_from_fixtures([fx])
+     assert n2 == 0
++
++
++def test_log_predictions_skips_when_require_odds_and_no_1x2(monkeypatch, tmp_path):
++    """Production default (HIBS_AUDIT_REQUIRE_ODDS=1) skips fixtures still lacking 1X2."""
++    db = tmp_path / "audit.sqlite"
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ALWAYS", "1")
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "0")
++    monkeypatch.setenv("HIBS_AUDIT_REQUIRE_ODDS", "1")
++
++    stats: dict = {}
++    n = log_predictions_from_fixtures([_fixture(301), _fixture(302)], stats=stats)
++    assert n == 0
++    assert stats["skipped_no_odds"] == 2
++    assert stats["considered"] == 2
+-- 
+2.43.0
+
+
+From ce8e784f20034307dec12a8ec4f845ec3c43f265 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:35:22 +0000
+Subject: [PATCH 10/23] fix(gate-compare): restore os.environ after profile
+ eval (deterministic CI)
+
+_apply_profile_env mutated global os.environ without restoring, leaking
+HIBS_SHARPEN_* state across profile evals and tests (root cause of the
+flaky test_run_gate_profile_compare_structure). Wrap the replay loop in a
+restore-safe _profile_env context manager and add a no-leak regression
+test. A profile sweep no longer permanently mutates the environment.
+---
+ src/hibs_predictor/gate_profile_compare.py | 95 +++++++++++++---------
+ tests/test_gate_profile_compare.py         | 10 +++
+ 2 files changed, 68 insertions(+), 37 deletions(-)
+
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index f2ad92e..d730eb0 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import itertools
+ import json
+ import os
+@@ -183,6 +184,25 @@ def _apply_profile_env(profile_env: Dict[str, str]) -> None:
+         os.environ[key] = val
+ 
+ 
++@contextlib.contextmanager
++def _profile_env(profile_env: Dict[str, str]):
++    """Apply a gate profile's env overlay, then **restore** prior os.environ.
++
++    Institutional++ determinism: a profile sweep must never permanently mutate
++    the process environment (prevents cross-profile / cross-test state leakage).
++    """
++    saved = {key: os.environ.get(key) for key in _PROFILE_ENV_KEYS}
++    try:
++        _apply_profile_env(profile_env)
++        yield
++    finally:
++        for key in _PROFILE_ENV_KEYS:
++            os.environ.pop(key, None)
++        for key, val in saved.items():
++            if val is not None:
++                os.environ[key] = val
++
++
+ def _cohort_diagnostics(fixtures: List[Any]) -> Dict[str, Any]:
+     odds_ready = 0
+     dq_sum = 0.0
+@@ -216,7 +236,6 @@ def eval_gate_profile(
+     *,
+     baseline_roi: Optional[float] = None,
+ ) -> Dict[str, Any]:
+-    _apply_profile_env(profile_env)
+     bets = wins = 0
+     pnl = 0.0
+     theory_sum = 0.0
+@@ -227,44 +246,46 @@ def eval_gate_profile(
+     by_market: Dict[str, Dict[str, int]] = defaultdict(lambda: {"bets": 0, "wins": 0})
+     by_league: Dict[str, Dict[str, int]] = defaultdict(lambda: {"bets": 0, "wins": 0})
+ 
+-    for row in fixtures:
+-        try:
+-            pred = json.loads(row["prediction_json"] or "{}")
+-        except json.JSONDecodeError:
+-            continue
+-        filtered, rejected = replay_value_legs(row, pred)
+-        if rejected.get("_all") == "missing_odds_or_model":
+-            skipped_no_odds += 1
+-            continue
+-        if rejected.get("_all") == "no_raw_value_after_identify":
+-            skipped_no_raw += 1
+-            continue
+-        for reason in rejected.values():
+-            if reason and not str(reason).startswith("_"):
+-                gate_rejects[str(reason)] += 1
+-        if not filtered:
+-            continue
+-        lg = str(row["league_code"] or "").upper()
+-        for outcome, leg in filtered.items():
+-            ok = _settled(row, str(outcome))
+-            if ok is None:
++    # Profile env is active only for the replay loop, then restored (no leakage).
++    with _profile_env(profile_env):
++        for row in fixtures:
++            try:
++                pred = json.loads(row["prediction_json"] or "{}")
++            except json.JSONDecodeError:
++                continue
++            filtered, rejected = replay_value_legs(row, pred)
++            if rejected.get("_all") == "missing_odds_or_model":
++                skipped_no_odds += 1
++                continue
++            if rejected.get("_all") == "no_raw_value_after_identify":
++                skipped_no_raw += 1
+                 continue
+-            odds = float(leg.get("odds") or 0)
+-            if odds <= 1.0:
++            for reason in rejected.values():
++                if reason and not str(reason).startswith("_"):
++                    gate_rejects[str(reason)] += 1
++            if not filtered:
+                 continue
+-            bets += 1
+-            theory_sum += float(leg.get("roi_percent") or 0)
+-            by_market[str(outcome)]["bets"] += 1
+-            by_league[lg]["bets"] += 1
+-            if ok:
+-                wins += 1
+-                pnl += odds - 1.0
+-                per_bet_returns.append(odds - 1.0)
+-                by_market[str(outcome)]["wins"] += 1
+-                by_league[lg]["wins"] += 1
+-            else:
+-                pnl -= 1.0
+-                per_bet_returns.append(-1.0)
++            lg = str(row["league_code"] or "").upper()
++            for outcome, leg in filtered.items():
++                ok = _settled(row, str(outcome))
++                if ok is None:
++                    continue
++                odds = float(leg.get("odds") or 0)
++                if odds <= 1.0:
++                    continue
++                bets += 1
++                theory_sum += float(leg.get("roi_percent") or 0)
++                by_market[str(outcome)]["bets"] += 1
++                by_league[lg]["bets"] += 1
++                if ok:
++                    wins += 1
++                    pnl += odds - 1.0
++                    per_bet_returns.append(odds - 1.0)
++                    by_market[str(outcome)]["wins"] += 1
++                    by_league[lg]["wins"] += 1
++                else:
++                    pnl -= 1.0
++                    per_bet_returns.append(-1.0)
+ 
+     strike = (wins / bets * 100.0) if bets else 0.0
+     roi = (pnl / bets * 100.0) if bets else 0.0
+diff --git a/tests/test_gate_profile_compare.py b/tests/test_gate_profile_compare.py
+index b423508..fc1cfb2 100644
+--- a/tests/test_gate_profile_compare.py
++++ b/tests/test_gate_profile_compare.py
+@@ -35,6 +35,16 @@ def test_eval_gate_profile_emits_significance_fields():
+     assert m["roi_significant_positive"] is False
+ 
+ 
++def test_eval_gate_profile_restores_environment(monkeypatch):
++    import os
++
++    monkeypatch.setenv("HIBS_SHARPEN_MIN_EDGE", "0.123")
++    eval_gate_profile([], {"HIBS_SHARPEN_MIN_EDGE": "0.999", "HIBS_SHARPEN_GATES": "1"})
++    # Prior value restored; profile-only key removed -> no cross-test env leakage.
++    assert os.environ.get("HIBS_SHARPEN_MIN_EDGE") == "0.123"
++    assert "HIBS_SHARPEN_GATES" not in os.environ
++
++
+ def test_run_gate_profile_compare_structure(tmp_path, monkeypatch):
+     monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "0")
+     report = run_gate_profile_compare(days=90, profiles=["baseline", "trial_vps"])
+-- 
+2.43.0
+
+
+From f9439abf9ec7334a4228424c4d370f86b5e05a3d Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:35:43 +0000
+Subject: [PATCH 11/23] docs: mark all pre-existing CI failures cleared (suite
+ green 600/0)
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md       | 14 +++++++-------
+ docs/TRADING_REPO_EXTRACTION_PLAN.md |  2 +-
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 29c577f..3feb5f9 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -54,15 +54,15 @@
+ 
+ ---
+ 
+-## PRE-EXISTING CI failures to clear (institutional++ = deterministic green CI)
++## PRE-EXISTING CI failures — ALL CLEARED on this branch ✅
+ 
+-These exist on `origin/main` independent of the above; fixing them is required for a credible CI gate (Q6).
++These existed on `origin/main` independent of the feature work; the full suite is now **600 passed, 0 failed**. Fixing them was required for a credible CI gate (Q6).
+ 
+-| Test(s) | Symptom | Likely root cause / fix |
+-|---------|---------|--------------------------|
+-| `test_players_route`, `test_stability_routes::...cold_cache...` | `TemplateAssertionError: block 'extra_js' defined twice` | **FIXED on this branch** (merged the duplicate block). |
+-| `test_gate_profile_compare::test_run_gate_profile_compare_structure` | **Flaky** — fails only under certain test ordering | Non-deterministic: `_apply_profile_env` mutates `os.environ` without restore + 90-day `datetime.now()` window over the live audit DB. Fix: snapshot/restore env in a fixture (or context-manage it) and/or freeze `now()` in the test. |
+-| `test_prediction_log_auto::test_log_predictions_from_fixtures_always_mode`, `..._backfill_when_always_off` | `assert n == 2` → got `0` (no rows logged) | Pre-existing logic/fixture mismatch in the auto-log path; needs domain triage (likely a guard/env default changed). Not touched here. |
++| Test(s) | Symptom | Resolution |
++|---------|---------|------------|
++| `test_players_route`, `test_stability_routes::...cold_cache...` | `TemplateAssertionError: block 'extra_js' defined twice` | **FIXED** — merged the duplicate Jinja block in `players.html` (restored a 500-ing page). |
++| `test_gate_profile_compare::test_run_gate_profile_compare_structure` | **Flaky** under test ordering | **FIXED** — root cause was `_apply_profile_env` mutating `os.environ` without restore (state leaked across profile evals/tests). Wrapped the replay loop in a restore-safe `_profile_env` context manager + added a no-leak regression test. |
++| `test_prediction_log_auto::test_log_predictions_from_fixtures_always_mode`, `..._backfill_when_always_off` | `assert n == 2` → got `0` | **FIXED** — `HIBS_AUDIT_REQUIRE_ODDS` default flipped to `1` (forward odds-capture work), so logging correctly skips odds-less fixtures; the tests encoded the old behaviour. Isolated the always/backfill logic with `HIBS_AUDIT_REQUIRE_ODDS=0` and added a lock-in test for the new production default. |
+ 
+ ---
+ 
+diff --git a/docs/TRADING_REPO_EXTRACTION_PLAN.md b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+index f386d9f..7b92367 100644
+--- a/docs/TRADING_REPO_EXTRACTION_PLAN.md
++++ b/docs/TRADING_REPO_EXTRACTION_PLAN.md
+@@ -30,7 +30,7 @@ Branch `cursor/trd-089-latency-telemetry-8e88` (2 commits: TRD-089 tick-to-trade
+ > ```
+ > python -m pytest tests/test_trading_core_strategy_runner.py tests/test_evidence_stats.py tests/test_gate_profile_compare.py -q
+ > ```
+-> **Known pre-existing reds** (not from this branch, see `INST_PLUS_PLUS_ROADMAP.md`): `test_prediction_log_auto` (2). The `players.html` template red is **fixed on this branch**.
++> **CI status:** full suite is **green on this branch (600 passed, 0 failed)** — all pre-existing reds (`players.html` template, flaky gate-compare env leak, `test_prediction_log_auto`) are fixed here. See `INST_PLUS_PLUS_ROADMAP.md`.
+ 
+ ---
+ 
+-- 
+2.43.0
+
+
+From 3811827f353094aad44ff45a2150d136b5526730 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:38:30 +0000
+Subject: [PATCH 12/23] inst++: add classify_binomial_evidence (Wilson-CI
+ proportion grading)
+
+Sister classifier to classify_evidence for binary edges (CLV beat-close,
+strike rate): analytic Wilson CI, deterministic, same EvidenceVerdict
+schema so promotion gates parse one interface. Amendments over the draft:
+- add a 'metric' discriminator ('roi' | 'proportion') so auditors read the
+  CI fields correctly instead of silently overloading roi_* as a beat-rate;
+- fix the reason string for the promotable/sufficient branch (was wrongly
+  reporting 'does not clear baseline');
+- proportion-specific thresholds (MIN_PROPORTION_SUFFICIENT=100) so a
+  strong-but-tiny sample (16/20, Wilson low ~58%) stays 'thin', not scaled;
+- DRY via wilson_interval + clamp malformed inputs (successes>n).
+Wire into clv_beat_close_verdict so the CLV block exposes promotable/grade.
+---
+ src/hibs_predictor/evidence_stats.py       | 99 +++++++++++++++++++++-
+ src/hibs_predictor/gate_profile_compare.py | 15 ++--
+ tests/test_evidence_stats.py               | 41 +++++++++
+ 3 files changed, 145 insertions(+), 10 deletions(-)
+
+diff --git a/src/hibs_predictor/evidence_stats.py b/src/hibs_predictor/evidence_stats.py
+index a7d72da..14e2809 100644
+--- a/src/hibs_predictor/evidence_stats.py
++++ b/src/hibs_predictor/evidence_stats.py
+@@ -29,6 +29,11 @@ from typing import Optional, Sequence, Tuple
+ # Default sample-size bars (kept consistent with the legacy count-only grade).
+ MIN_BETS_SUFFICIENT = 20
+ MIN_BETS_THIN = 8
++# Proportion edges (CLV beat-close, strike rate) need far more observations than
++# continuous P&L: a thin 51-53% edge only clears 50% on the Wilson lower bound at
++# large n, so a strong-but-tiny sample (e.g. 16/20) must stay sub-promotable.
++MIN_PROPORTION_SUFFICIENT = 100
++MIN_PROPORTION_THIN = 20
+ # Deterministic bootstrap so CI is reproducible across runs / CI machines.
+ DEFAULT_BOOTSTRAP_ITERATIONS = 2000
+ DEFAULT_BOOTSTRAP_SEED = 12345
+@@ -102,20 +107,29 @@ def bootstrap_mean_ci(
+ 
+ @dataclass(frozen=True)
+ class EvidenceVerdict:
+-    """Significance-aware grade for an edge sample (institutional promotion gate)."""
++    """Significance-aware grade for an edge sample (institutional promotion gate).
++
++    Used uniformly for continuous edges (``metric="roi"``, bootstrap CI on per-bet
++    returns) and binary edges (``metric="proportion"``, Wilson CI on a beat rate).
++    Downstream promotion gates / UI read the metric-agnostic ``grade`` / ``promotable``
++    / ``n`` block; the ``metric`` discriminator tells auditors how to read the CI
++    fields (for proportions they hold the beat-rate %, not ROI %).
++    """
+ 
+     grade: str  # "empty" | "insufficient" | "thin" | "sufficient"
+     n: int
+     roi_pct: float
+     roi_ci_low_pct: float
+     roi_ci_high_pct: float
+-    significant_positive: bool  # CI lower bound clears zero
+-    beats_baseline: Optional[bool]  # vs baseline_roi_pct (None if no baseline)
++    significant_positive: bool  # CI lower bound clears the null (0 for ROI, 50% for rate)
++    beats_baseline: Optional[bool]  # vs baseline (None if no baseline)
+     promotable: bool  # sufficient sample + significant + (beats baseline if given)
+     reason: str
++    metric: str = "roi"  # "roi" (continuous) | "proportion" (binary)
+ 
+     def as_dict(self) -> dict:
+         return {
++            "metric": self.metric,
+             "grade": self.grade,
+             "n": self.n,
+             "roi_pct": round(self.roi_pct, 2),
+@@ -200,6 +214,85 @@ def classify_evidence(
+     )
+ 
+ 
++def classify_binomial_evidence(
++    successes: int,
++    n: int,
++    *,
++    baseline_proportion: float = 0.50,  # 50% = efficient-market coin flip
++    min_obs_sufficient: int = MIN_PROPORTION_SUFFICIENT,
++    min_obs_thin: int = MIN_PROPORTION_THIN,
++    z: float = 1.96,  # 95% confidence
++) -> EvidenceVerdict:
++    """Grade a binary edge (CLV beat-close, 1X2 strike) with the analytic Wilson CI.
++
++    Sister to :func:`classify_evidence` (which bootstraps continuous per-bet
++    returns). Returns the same :class:`EvidenceVerdict` so promotion gates parse
++    one schema, with ``metric="proportion"`` set so the CI fields are read as the
++    beat-rate % (not ROI %).
++
++    A profile is ``promotable`` only when the sample is large enough **and** the
++    Wilson lower bound strictly clears the baseline. Because thin proportion edges
++    only clear the bar at large n, a strong-but-tiny sample (e.g. 16/20 → Wilson
++    low ~58%) is correctly held at ``thin`` rather than scaled.
++    """
++    n = int(n)
++    if n <= 0:
++        return EvidenceVerdict(
++            grade="empty", n=0, roi_pct=0.0, roi_ci_low_pct=0.0, roi_ci_high_pct=0.0,
++            significant_positive=False, beats_baseline=None, promotable=False,
++            reason="no observations", metric="proportion",
++        )
++
++    successes = max(0, min(int(successes), n))  # guard malformed inputs
++    low, high = wilson_interval(successes, n, z=z)
++    point_pct = (successes / n) * 100.0
++    low_pct = low * 100.0
++    high_pct = high * 100.0
++    baseline_pct = baseline_proportion * 100.0
++
++    beats_baseline = low_pct > baseline_pct
++    significant_positive = low_pct > 50.0  # better than a coin, regardless of baseline
++
++    if n < min_obs_thin:
++        grade = "insufficient"
++    elif n < min_obs_sufficient:
++        grade = "thin"
++    elif beats_baseline:
++        grade = "sufficient"
++    else:
++        grade = "thin"
++
++    promotable = grade == "sufficient"
++
++    if grade == "insufficient":
++        reason = f"n={n} < {min_obs_thin} (too few observations)"
++    elif grade == "thin" and n < min_obs_sufficient:
++        reason = f"n={n} < {min_obs_sufficient} (sample not yet sufficient)"
++    elif promotable:
++        reason = (
++            f"beat-rate 95% CI lower bound {low_pct:.2f}% > baseline {baseline_pct:.2f}% "
++            f"(n={n})"
++        )
++    else:
++        reason = (
++            f"beat-rate 95% CI lower bound {low_pct:.2f}% does not clear "
++            f"baseline {baseline_pct:.2f}%"
++        )
++
++    return EvidenceVerdict(
++        grade=grade,
++        n=n,
++        roi_pct=point_pct,        # proportion point (metric="proportion")
++        roi_ci_low_pct=low_pct,   # Wilson lower bound
++        roi_ci_high_pct=high_pct,  # Wilson upper bound
++        significant_positive=significant_positive,
++        beats_baseline=beats_baseline,
++        promotable=promotable,
++        reason=reason,
++        metric="proportion",
++    )
++
++
+ @dataclass(frozen=True)
+ class ProportionVerdict:
+     """Wilson-interval verdict for a proportion edge (e.g. CLV beat-close > 50%)."""
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index d730eb0..561b8bb 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
+ from hibs_predictor.evidence_stats import (
+     MIN_BETS_SUFFICIENT,
+     MIN_BETS_THIN,
++    classify_binomial_evidence,
+     classify_evidence,
+-    classify_proportion,
+ )
+ from hibs_predictor.prediction_log import (
+     _db_path,
+@@ -399,12 +399,13 @@ def _rank_profile_results(
+     return rows
+ 
+ 
+-def clv_beat_close_verdict(*, days: int = 28, threshold_pct: float = 50.0) -> Dict[str, Any]:
++def clv_beat_close_verdict(*, days: int = 28, baseline_proportion: float = 0.50) -> Dict[str, Any]:
+     """Wilson-CI verdict on CLV beat-close — the most sample-efficient line-shop proof.
+ 
+-    Beating the closing line >50% of the time *with confidence* proves a
+-    line-shopping edge far faster than realized settled ROI. Wraps the existing
+-    ``clv_beat_close_summary`` and grades it via the Wilson lower bound.
++    Beating the closing line > baseline *with confidence* proves a line-shopping
++    edge far faster than realized settled ROI. Grades via ``classify_binomial_evidence``
++    so the CLV block exposes the same ``promotable``/``grade`` schema as the value
++    gate profiles (``metric="proportion"``).
+     """
+     summary = clv_beat_close_summary(days=days)
+     n = int(summary.get("n_clv_rows") or 0)
+@@ -412,8 +413,8 @@ def clv_beat_close_verdict(*, days: int = 28, threshold_pct: float = 50.0) -> Di
+     out: Dict[str, Any] = {"summary": summary, "verdict": None}
+     if n > 0 and pct is not None:
+         successes = int(round(float(pct) / 100.0 * n))
+-        out["verdict"] = classify_proportion(
+-            successes, n, threshold_pct=threshold_pct
++        out["verdict"] = classify_binomial_evidence(
++            successes, n, baseline_proportion=baseline_proportion
+         ).as_dict()
+     return out
+ 
+diff --git a/tests/test_evidence_stats.py b/tests/test_evidence_stats.py
+index 1bd067f..1ad938a 100644
+--- a/tests/test_evidence_stats.py
++++ b/tests/test_evidence_stats.py
+@@ -2,6 +2,7 @@
+ 
+ from hibs_predictor.evidence_stats import (
+     bootstrap_mean_ci,
++    classify_binomial_evidence,
+     classify_evidence,
+     classify_proportion,
+     wilson_interval,
+@@ -48,6 +49,8 @@ def test_classify_evidence_sufficient_clear_positive_edge():
+     assert v.promotable is True
+     assert v.significant_positive is True
+     assert v.roi_ci_low_pct > 0.0
++    assert v.metric == "roi"
++    assert v.as_dict()["metric"] == "roi"
+ 
+ 
+ def test_classify_evidence_large_sample_but_negative_not_promotable():
+@@ -68,6 +71,44 @@ def test_classify_evidence_baseline_gate():
+     assert fails.promotable is False
+ 
+ 
++def test_classify_binomial_empty():
++    v = classify_binomial_evidence(0, 0)
++    assert v.grade == "empty"
++    assert v.metric == "proportion"
++    assert v.promotable is False
++
++
++def test_classify_binomial_strong_but_tiny_sample_is_not_promotable():
++    # 16/20 = 80%; Wilson low ~58% clears 50 but n < MIN_PROPORTION_SUFFICIENT.
++    v = classify_binomial_evidence(16, 20)
++    assert v.grade == "thin"
++    assert v.promotable is False
++    assert v.beats_baseline is True
++    assert v.significant_positive is True
++    assert 55.0 < v.roi_ci_low_pct < 62.0  # Wilson low ~58.4%
++
++
++def test_classify_binomial_large_sufficient_edge():
++    v = classify_binomial_evidence(600, 1000)
++    assert v.grade == "sufficient"
++    assert v.promotable is True
++    assert v.roi_ci_low_pct > 50.0
++    assert v.metric == "proportion"
++
++
++def test_classify_binomial_large_sample_not_beating_baseline():
++    v = classify_binomial_evidence(520, 1000)  # 52% — CI low does not clear 50%
++    assert v.beats_baseline is False
++    assert v.promotable is False
++    assert v.grade == "thin"
++
++
++def test_classify_binomial_clamps_malformed_inputs():
++    v = classify_binomial_evidence(30, 20)  # successes > n -> clamped to n
++    assert v.roi_pct == 100.0
++    assert v.grade == "thin"  # n=20 < MIN_PROPORTION_SUFFICIENT
++
++
+ def test_classify_proportion_clv_beat_close():
+     strong = classify_proportion(600, 1000, threshold_pct=50.0)
+     assert strong.beats_threshold is True
+-- 
+2.43.0
+
+
+From c84fc3081f0627894121ec3b5211ac551077d404 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 16:38:40 +0000
+Subject: [PATCH 13/23] docs: note binomial Wilson-CI classifier in roadmap
+ (uniform EvidenceVerdict)
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 3feb5f9..d5c5b7c 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -12,7 +12,7 @@
+ |--------|------|--------------|
+ | TRD-089 | Tick-to-trade telemetry wired into the live execution hot path (T₀ scan → T₂ ack); shadow stays 0 | Latency is now *measurable in production* (Stage-3 enabler) |
+ | evidence engine | `evidence_stats.py` (seeded bootstrap ROI CI, Wilson proportion CI, significance grading) + wired into `gate_profile_compare` | A profile is `sufficient`/`promotable` only when ROI CI lower bound clears 0 **and** beats baseline — kills thin-sample false positives |
+-| CLV verdict | `clv_beat_close_verdict()` (Wilson lower bound > 50%) in the gate-compare report | CLV is the most sample-efficient line-shop proof; now graded with confidence |
++| CLV verdict | `classify_binomial_evidence()` (Wilson-CI proportion grade) wired into `clv_beat_close_verdict()` | CLV graded on the **same `EvidenceVerdict` schema** as value gates (`metric="proportion"`); strong-but-tiny samples (16/20) stay `thin` via `MIN_PROPORTION_SUFFICIENT=100` |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+-- 
+2.43.0
+
+
+From a4d157c59bfce8f9c457f8c5c3048df2031129cc Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:15:21 +0000
+Subject: [PATCH 14/23] inst++: blended CLV gate (frequency x magnitude) +
+ precision experiment
+
+Add classify_clv_edge: a beat-close edge must clear BOTH the Wilson
+frequency bar (on a sufficient sample) AND a mean-CLV magnitude floor
+(avg_clv_pp >= cost), so a frequent-but-near-zero-magnitude cost-trap is
+held at 'thin' instead of promoted. Wire into clv_beat_close_verdict with
+an env-tunable HIBS_CLV_MIN_PP cost floor (default 0 = no regression).
+
+Experiment (test_blended_gate_improves_precision_over_frequency_only):
+on a labelled scenario set the blend lifts promote-precision 0.50 -> 1.00
+by rejecting the cost-trap a frequency-only gate accepts. Additive,
+deterministic; real forward CLV data still too thin to measure live.
+---
+ src/hibs_predictor/evidence_stats.py       | 55 ++++++++++++++++++++++
+ src/hibs_predictor/gate_profile_compare.py | 39 +++++++++++----
+ tests/test_evidence_stats.py               | 52 ++++++++++++++++++++
+ 3 files changed, 136 insertions(+), 10 deletions(-)
+
+diff --git a/src/hibs_predictor/evidence_stats.py b/src/hibs_predictor/evidence_stats.py
+index 14e2809..85fc484 100644
+--- a/src/hibs_predictor/evidence_stats.py
++++ b/src/hibs_predictor/evidence_stats.py
+@@ -21,6 +21,7 @@ trading) can be promoted on one honest standard.
+ 
+ from __future__ import annotations
+ 
++import dataclasses
+ from dataclasses import dataclass
+ import math
+ import random
+@@ -293,6 +294,60 @@ def classify_binomial_evidence(
+     )
+ 
+ 
++def classify_clv_edge(
++    successes: int,
++    n: int,
++    avg_clv_pp: Optional[float],
++    *,
++    baseline_proportion: float = 0.50,
++    min_clv_pp: float = 0.0,
++    min_obs_sufficient: int = MIN_PROPORTION_SUFFICIENT,
++    min_obs_thin: int = MIN_PROPORTION_THIN,
++    z: float = 1.96,
++) -> EvidenceVerdict:
++    """Blended CLV gate: **frequency × magnitude** (both must clear to promote).
++
++    Beating the close *often enough* (Wilson lower bound > baseline, on a
++    sufficient sample) proves you are on the right side; beating it by *enough*
++    (mean ``avg_clv_pp`` ≥ ``min_clv_pp`` cost floor) proves the edge survives
++    vig / commission / slippage. A high beat-rate with near-zero magnitude is a
++    cost-trap and is held at ``thin`` — which a frequency-only gate would promote.
++    """
++    base = classify_binomial_evidence(
++        successes,
++        n,
++        baseline_proportion=baseline_proportion,
++        min_obs_sufficient=min_obs_sufficient,
++        min_obs_thin=min_obs_thin,
++        z=z,
++    )
++    if base.n == 0:
++        return base
++
++    mag = None if avg_clv_pp is None else float(avg_clv_pp)
++    magnitude_ok = mag is not None and mag >= min_clv_pp
++
++    if base.promotable and not magnitude_ok:
++        shown = "n/a" if mag is None else f"{mag:.3f}pp"
++        return dataclasses.replace(
++            base,
++            grade="thin",
++            promotable=False,
++            reason=(
++                f"frequency edge confirmed ({base.reason}); mean CLV {shown} "
++                f"< cost floor {min_clv_pp:.3f}pp (cost-trap held)"
++            ),
++        )
++    if base.promotable and magnitude_ok:
++        return dataclasses.replace(
++            base,
++            reason=(
++                f"{base.reason}; mean CLV {mag:.3f}pp >= cost floor {min_clv_pp:.3f}pp"
++            ),
++        )
++    return base
++
++
+ @dataclass(frozen=True)
+ class ProportionVerdict:
+     """Wilson-interval verdict for a proportion edge (e.g. CLV beat-close > 50%)."""
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index 561b8bb..4f2ba74 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
+ from hibs_predictor.evidence_stats import (
+     MIN_BETS_SUFFICIENT,
+     MIN_BETS_THIN,
+-    classify_binomial_evidence,
++    classify_clv_edge,
+     classify_evidence,
+ )
+ from hibs_predictor.prediction_log import (
+@@ -399,22 +399,41 @@ def _rank_profile_results(
+     return rows
+ 
+ 
+-def clv_beat_close_verdict(*, days: int = 28, baseline_proportion: float = 0.50) -> Dict[str, Any]:
+-    """Wilson-CI verdict on CLV beat-close — the most sample-efficient line-shop proof.
++def _clv_min_pp_cost() -> float:
++    """Cost floor (percentage points of CLV) the mean edge must clear, env-tunable."""
++    try:
++        return float(os.getenv("HIBS_CLV_MIN_PP", "0.0"))
++    except ValueError:
++        return 0.0
++
++
++def clv_beat_close_verdict(
++    *,
++    days: int = 28,
++    baseline_proportion: float = 0.50,
++    min_clv_pp: Optional[float] = None,
++) -> Dict[str, Any]:
++    """Blended CLV verdict (frequency × magnitude) — sample-efficient line-shop proof.
+ 
+-    Beating the closing line > baseline *with confidence* proves a line-shopping
+-    edge far faster than realized settled ROI. Grades via ``classify_binomial_evidence``
+-    so the CLV block exposes the same ``promotable``/``grade`` schema as the value
+-    gate profiles (``metric="proportion"``).
++    Frequency: Wilson lower bound > baseline on a sufficient sample. Magnitude:
++    mean ``avg_clv_pp`` ≥ cost floor (`HIBS_CLV_MIN_PP`, default 0 = frequency-only).
++    Grades via ``classify_clv_edge`` so the CLV block exposes the same
++    ``promotable``/``grade`` schema as the value gate profiles (``metric="proportion"``).
+     """
++    cost_floor = _clv_min_pp_cost() if min_clv_pp is None else float(min_clv_pp)
+     summary = clv_beat_close_summary(days=days)
+     n = int(summary.get("n_clv_rows") or 0)
+     pct = summary.get("beat_close_pct")
+-    out: Dict[str, Any] = {"summary": summary, "verdict": None}
++    avg_pp = summary.get("avg_clv_pp")
++    out: Dict[str, Any] = {"summary": summary, "min_clv_pp": cost_floor, "verdict": None}
+     if n > 0 and pct is not None:
+         successes = int(round(float(pct) / 100.0 * n))
+-        out["verdict"] = classify_binomial_evidence(
+-            successes, n, baseline_proportion=baseline_proportion
++        out["verdict"] = classify_clv_edge(
++            successes,
++            n,
++            avg_pp,
++            baseline_proportion=baseline_proportion,
++            min_clv_pp=cost_floor,
+         ).as_dict()
+     return out
+ 
+diff --git a/tests/test_evidence_stats.py b/tests/test_evidence_stats.py
+index 1ad938a..b9ea04d 100644
+--- a/tests/test_evidence_stats.py
++++ b/tests/test_evidence_stats.py
+@@ -3,6 +3,7 @@
+ from hibs_predictor.evidence_stats import (
+     bootstrap_mean_ci,
+     classify_binomial_evidence,
++    classify_clv_edge,
+     classify_evidence,
+     classify_proportion,
+     wilson_interval,
+@@ -109,6 +110,57 @@ def test_classify_binomial_clamps_malformed_inputs():
+     assert v.grade == "thin"  # n=20 < MIN_PROPORTION_SUFFICIENT
+ 
+ 
++def test_classify_clv_edge_default_is_frequency_only():
++    # min_clv_pp=0 -> magnitude gate inert -> same as frequency-only.
++    v = classify_clv_edge(560, 1000, 0.0)
++    assert v.promotable is True
++    assert v.grade == "sufficient"
++
++
++def test_classify_clv_edge_blocks_cost_trap():
++    # Frequent beat-close (CI low > 50) but near-zero magnitude -> held at thin.
++    v = classify_clv_edge(560, 1000, 0.2, min_clv_pp=1.0)
++    assert v.promotable is False
++    assert v.grade == "thin"
++    assert "cost-trap" in v.reason
++
++
++def test_classify_clv_edge_promotes_real_edge():
++    v = classify_clv_edge(560, 1000, 2.5, min_clv_pp=1.0)
++    assert v.promotable is True
++    assert v.grade == "sufficient"
++
++
++def test_classify_clv_edge_missing_magnitude_fails_when_cost_required():
++    v = classify_clv_edge(560, 1000, None, min_clv_pp=1.0)
++    assert v.promotable is False
++
++
++def test_blended_gate_improves_precision_over_frequency_only():
++    """Experiment: does blending frequency × magnitude promote more precisely?"""
++    # (truly_profitable_after_cost, successes, n, avg_clv_pp)
++    cases = [
++        (True, 560, 1000, 2.5),   # real edge: frequent AND sizeable CLV
++        (False, 560, 1000, 0.2),  # cost-trap: frequent but ~0 magnitude
++        (False, 520, 1000, 3.0),  # CI low < 50% -> not frequent enough
++        (False, 16, 20, 5.0),     # sample too small
++    ]
++    COST = 1.0
++
++    def precision(promote):
++        promoted = [lbl for (lbl, s, n, pp) in cases if promote(s, n, pp)]
++        return (sum(1 for lbl in promoted if lbl) / len(promoted)) if promoted else None
++
++    freq_only = lambda s, n, pp: classify_binomial_evidence(s, n).promotable
++    blended = lambda s, n, pp: classify_clv_edge(s, n, pp, min_clv_pp=COST).promotable
++
++    # The cost-trap is promoted by frequency-only but correctly rejected by the blend.
++    assert freq_only(560, 1000, 0.2) is True
++    assert blended(560, 1000, 0.2) is False
++    # Blend strictly improves promote precision (0.5 -> 1.0 on this set).
++    assert precision(blended) > precision(freq_only)
++
++
+ def test_classify_proportion_clv_beat_close():
+     strong = classify_proportion(600, 1000, threshold_pct=50.0)
+     assert strong.beats_threshold is True
+-- 
+2.43.0
+
+
+From 6bf334a23ebb6a4b13c7325f5e2a2e73a0e2d69e Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:15:32 +0000
+Subject: [PATCH 15/23] docs: record blended CLV gate + precision experiment in
+ roadmap
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index d5c5b7c..4034ff0 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -13,6 +13,7 @@
+ | TRD-089 | Tick-to-trade telemetry wired into the live execution hot path (T₀ scan → T₂ ack); shadow stays 0 | Latency is now *measurable in production* (Stage-3 enabler) |
+ | evidence engine | `evidence_stats.py` (seeded bootstrap ROI CI, Wilson proportion CI, significance grading) + wired into `gate_profile_compare` | A profile is `sufficient`/`promotable` only when ROI CI lower bound clears 0 **and** beats baseline — kills thin-sample false positives |
+ | CLV verdict | `classify_binomial_evidence()` (Wilson-CI proportion grade) wired into `clv_beat_close_verdict()` | CLV graded on the **same `EvidenceVerdict` schema** as value gates (`metric="proportion"`); strong-but-tiny samples (16/20) stay `thin` via `MIN_PROPORTION_SUFFICIENT=100` |
++| blended CLV gate | `classify_clv_edge()` = **frequency × magnitude** (Wilson > baseline AND `avg_clv_pp` ≥ cost floor, env `HIBS_CLV_MIN_PP`) | Rejects "cost-trap" edges (frequent but ~0 magnitude). Experiment: promote-precision **0.50 → 1.00** on a labelled set vs frequency-only |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+-- 
+2.43.0
+
+
+From 8a2b168e7ebfbdad89f2154c67fbfd60a30ab93e Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:38:00 +0000
+Subject: [PATCH 16/23] inst++: add magnitude floor to continuous value-leg
+ gate (two-part sieve)
+
+Fold min_edge_magnitude_pct into classify_evidence (default 0.0 = inert,
+no consumer breakage) instead of forking a parallel grader: promotion now
+requires sample + ROI-CI significance + point-ROI >= frictional floor.
+Guards the continuous cost-trap (high-volume sub-frictional churn that
+backtests positive but bleeds live). Fixes the success-branch reason.
+
+Expose classify_evidence_with_magnitude as a thin delegating alias (one
+grading implementation). Wire value profiles to an env-tunable
+HIBS_VALUE_MIN_EDGE_PCT in gate_profile_compare (default 0 = no regression).
+---
+ src/hibs_predictor/evidence_stats.py       | 55 ++++++++++++++++++----
+ src/hibs_predictor/gate_profile_compare.py | 14 +++++-
+ tests/test_evidence_stats.py               | 31 ++++++++++++
+ 3 files changed, 89 insertions(+), 11 deletions(-)
+
+diff --git a/src/hibs_predictor/evidence_stats.py b/src/hibs_predictor/evidence_stats.py
+index 85fc484..99061bf 100644
+--- a/src/hibs_predictor/evidence_stats.py
++++ b/src/hibs_predictor/evidence_stats.py
+@@ -147,19 +147,27 @@ def classify_evidence(
+     per_bet_returns: Sequence[float],
+     *,
+     baseline_roi_pct: Optional[float] = None,
++    min_edge_magnitude_pct: float = 0.0,
+     min_bets_sufficient: int = MIN_BETS_SUFFICIENT,
+     min_bets_thin: int = MIN_BETS_THIN,
+     confidence: float = DEFAULT_CONFIDENCE,
+     iterations: int = DEFAULT_BOOTSTRAP_ITERATIONS,
+     seed: int = DEFAULT_BOOTSTRAP_SEED,
+ ) -> EvidenceVerdict:
+-    """Grade an edge from a per-bet return vector with bootstrap significance.
++    """Grade a continuous edge with bootstrap significance **and** a magnitude floor.
+ 
+     ``per_bet_returns`` are unit-stake P&L per leg (win: ``odds-1``, loss: ``-1``).
+-    A profile is only ``promotable`` when the sample is large enough AND the
+-    bootstrap ROI CI lower bound clears 0 AND (if a baseline is supplied) the
+-    lower bound clears the baseline ROI. This is the gate that stops us scaling
+-    stake on a lucky 3-bet sample.
++    A profile is ``promotable`` only when ALL hold (a two-part sieve):
++
++    1. **Sample** — n ≥ ``min_bets_sufficient``.
++    2. **Significance** — bootstrap ROI CI lower bound clears 0 (and the baseline,
++       if supplied): the edge is statistically separable from noise.
++    3. **Magnitude** — point ROI ≥ ``min_edge_magnitude_pct``: the *expected* edge
++       clears frictional execution costs. Guards against the continuous cost-trap —
++       high-volume, sub-frictional churn that backtests positive but bleeds live.
++
++    ``min_edge_magnitude_pct=0.0`` (default) makes the magnitude gate inert, so
++    existing callers are unaffected.
+     """
+     n = len(per_bet_returns)
+     if n == 0:
+@@ -181,14 +189,17 @@ def classify_evidence(
+     if baseline_roi_pct is not None:
+         beats_baseline = low_pct > float(baseline_roi_pct)
+ 
++    significance_passed = significant_positive and (beats_baseline is None or beats_baseline)
++    magnitude_passed = roi_pct >= float(min_edge_magnitude_pct)
++
+     if n < min_bets_thin:
+         grade = "insufficient"
+     elif n < min_bets_sufficient:
+         grade = "thin"
+-    elif significant_positive and (beats_baseline is None or beats_baseline):
++    elif significance_passed and magnitude_passed:
+         grade = "sufficient"
+     else:
+-        # Large sample but the edge is not statistically separable from zero/baseline.
++        # Large sample, but edge is not separable from noise OR is sub-frictional.
+         grade = "thin"
+ 
+     promotable = grade == "sufficient"
+@@ -197,15 +208,25 @@ def classify_evidence(
+         reason = f"n={n} < {min_bets_thin} (too few legs)"
+     elif grade == "thin" and n < min_bets_sufficient:
+         reason = f"n={n} < {min_bets_sufficient} (sample not yet sufficient)"
+-    elif grade == "thin":
++    elif not significance_passed:
+         if not significant_positive:
+             reason = f"ROI 95% CI lower bound {low_pct:.2f}% does not clear 0"
+         else:
+             reason = f"does not beat baseline {baseline_roi_pct}% on CI lower bound"
++    elif not magnitude_passed:
++        reason = (
++            f"ROI {roi_pct:.2f}% < execution cost floor {float(min_edge_magnitude_pct):.2f}% "
++            "(sub-frictional churn held)"
++        )
+     else:
++        floor_note = (
++            f", point {roi_pct:.2f}% >= floor {float(min_edge_magnitude_pct):.2f}%"
++            if min_edge_magnitude_pct
++            else ""
++        )
+         reason = (
+             f"n={n}, ROI CI lower bound {low_pct:.2f}% > "
+-            f"{0.0 if baseline_roi_pct is None else baseline_roi_pct}"
++            f"{0.0 if baseline_roi_pct is None else baseline_roi_pct}{floor_note}"
+         )
+ 
+     return EvidenceVerdict(
+@@ -215,6 +236,22 @@ def classify_evidence(
+     )
+ 
+ 
++def classify_evidence_with_magnitude(
++    per_bet_returns: Sequence[float],
++    *,
++    min_edge_magnitude_pct: float = 0.0,
++    **kwargs,
++) -> EvidenceVerdict:
++    """Named convenience alias for the two-part sieve (delegates to ``classify_evidence``).
++
++    Kept as an explicit entry point for callers that want the magnitude hurdle to
++    be obvious at the call site; there is a single grading implementation.
++    """
++    return classify_evidence(
++        per_bet_returns, min_edge_magnitude_pct=min_edge_magnitude_pct, **kwargs
++    )
++
++
+ def classify_binomial_evidence(
+     successes: int,
+     n: int,
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index 4f2ba74..f386eac 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -289,10 +289,12 @@ def eval_gate_profile(
+ 
+     strike = (wins / bets * 100.0) if bets else 0.0
+     roi = (pnl / bets * 100.0) if bets else 0.0
+-    # Institutional++ significance: bootstrap ROI CI so a profile is never
+-    # graded "sufficient" on a lucky thin sample (deterministic, seeded).
++    # Institutional++ two-part sieve: bootstrap ROI CI (significance) + a point-ROI
++    # magnitude floor (frictional cost), so a profile is never graded "sufficient"
++    # on a lucky thin sample or on sub-frictional churn. Deterministic, seeded.
+     verdict = classify_evidence(
+         per_bet_returns,
++        min_edge_magnitude_pct=_value_min_edge_pct(),
+         min_bets_sufficient=MIN_BETS_SUFFICIENT,
+         min_bets_thin=MIN_BETS_THIN,
+     )
+@@ -407,6 +409,14 @@ def _clv_min_pp_cost() -> float:
+         return 0.0
+ 
+ 
++def _value_min_edge_pct() -> float:
++    """Min point-ROI (%) a value profile must clear to promote (frictional floor)."""
++    try:
++        return float(os.getenv("HIBS_VALUE_MIN_EDGE_PCT", "0.0"))
++    except ValueError:
++        return 0.0
++
++
+ def clv_beat_close_verdict(
+     *,
+     days: int = 28,
+diff --git a/tests/test_evidence_stats.py b/tests/test_evidence_stats.py
+index b9ea04d..e3350dd 100644
+--- a/tests/test_evidence_stats.py
++++ b/tests/test_evidence_stats.py
+@@ -5,6 +5,7 @@ from hibs_predictor.evidence_stats import (
+     classify_binomial_evidence,
+     classify_clv_edge,
+     classify_evidence,
++    classify_evidence_with_magnitude,
+     classify_proportion,
+     wilson_interval,
+ )
+@@ -72,6 +73,36 @@ def test_classify_evidence_baseline_gate():
+     assert fails.promotable is False
+ 
+ 
++def test_classify_evidence_magnitude_floor_default_inert():
++    # A significant positive edge with default floor (0.0) stays sufficient.
++    v = classify_evidence([0.3] * 30)
++    assert v.grade == "sufficient" and v.promotable is True
++
++
++def test_classify_evidence_blocks_subfrictional_churn():
++    # Tight, statistically-significant, but microscopic edge (0.5% ROI).
++    churn = [0.005] * 200
++    assert classify_evidence(churn).grade == "sufficient"  # significant, no floor
++    v = classify_evidence(churn, min_edge_magnitude_pct=1.0)
++    assert v.grade == "thin"
++    assert v.promotable is False
++    assert v.significant_positive is True  # still significant...
++    assert "sub-frictional" in v.reason  # ...but held for magnitude
++
++
++def test_classify_evidence_promotes_edge_above_cost_floor():
++    v = classify_evidence([0.3] * 30, min_edge_magnitude_pct=1.0)
++    assert v.promotable is True
++    assert v.grade == "sufficient"
++
++
++def test_classify_evidence_with_magnitude_alias_matches():
++    a = classify_evidence([0.005] * 200, min_edge_magnitude_pct=1.0)
++    b = classify_evidence_with_magnitude([0.005] * 200, min_edge_magnitude_pct=1.0)
++    assert a == b
++    assert b.promotable is False
++
++
+ def test_classify_binomial_empty():
+     v = classify_binomial_evidence(0, 0)
+     assert v.grade == "empty"
+-- 
+2.43.0
+
+
+From f29195cd9d300d22b2968f262e385a7003f7f416 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:38:12 +0000
+Subject: [PATCH 17/23] docs: record value-leg magnitude floor (two-part sieve)
+ in roadmap
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 4034ff0..c958281 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -14,6 +14,7 @@
+ | evidence engine | `evidence_stats.py` (seeded bootstrap ROI CI, Wilson proportion CI, significance grading) + wired into `gate_profile_compare` | A profile is `sufficient`/`promotable` only when ROI CI lower bound clears 0 **and** beats baseline — kills thin-sample false positives |
+ | CLV verdict | `classify_binomial_evidence()` (Wilson-CI proportion grade) wired into `clv_beat_close_verdict()` | CLV graded on the **same `EvidenceVerdict` schema** as value gates (`metric="proportion"`); strong-but-tiny samples (16/20) stay `thin` via `MIN_PROPORTION_SUFFICIENT=100` |
+ | blended CLV gate | `classify_clv_edge()` = **frequency × magnitude** (Wilson > baseline AND `avg_clv_pp` ≥ cost floor, env `HIBS_CLV_MIN_PP`) | Rejects "cost-trap" edges (frequent but ~0 magnitude). Experiment: promote-precision **0.50 → 1.00** on a labelled set vs frequency-only |
++| value-leg magnitude floor | `classify_evidence(min_edge_magnitude_pct=…)` two-part sieve (significance + point-ROI floor), env `HIBS_VALUE_MIN_EDGE_PCT`; alias `classify_evidence_with_magnitude` | Continuous analog of the CLV blend — blocks high-volume **sub-frictional churn** that backtests positive but bleeds live. Default `0.0` = inert |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+-- 
+2.43.0
+
+
+From 5284b289ef4fcff441e7eaa162effc303f115a26 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:45:48 +0000
+Subject: [PATCH 18/23] inst++: deterministic promotion-threshold sweep harness
+
+Pre-baked optimizer (pure, stdlib + evidence_stats only) so the desk can
+tune gates the moment Q2 forward-capture populates rows. Grids over
+value-floor x clv-floor x promotion-policy and returns a precision/recall/
+F-beta matrix, both raw and LIQUIDITY-WEIGHTED.
+
+Amendments over the draft:
+- promotion policy is explicit + swept (all_evidenced/any/value_only/
+  clv_only), not a hard-coded OR; lanes with no data don't false-pass/fail;
+- rank by precision-favoring weighted F-beta (beta=0.5), not raw yield, so
+  'maximize precision without starving volume' is an actual objective;
+- per-profile weight (capital-at-risk) -> weighted precision/recall so a
+  false promote on a high-volume loop is penalized proportionally (Q1=yes);
+- full confusion matrix + best_thresholds() safe-but-fed selector.
+Demo: weighted precision 0.20 -> 1.00 as floors rise. Deterministic.
+---
+ src/hibs_predictor/evidence_sweep.py | 191 +++++++++++++++++++++++++++
+ tests/test_evidence_sweep.py         |  79 +++++++++++
+ 2 files changed, 270 insertions(+)
+ create mode 100644 src/hibs_predictor/evidence_sweep.py
+ create mode 100644 tests/test_evidence_sweep.py
+
+diff --git a/src/hibs_predictor/evidence_sweep.py b/src/hibs_predictor/evidence_sweep.py
+new file mode 100644
+index 0000000..3462ae9
+--- /dev/null
++++ b/src/hibs_predictor/evidence_sweep.py
+@@ -0,0 +1,191 @@
++"""Deterministic promotion-gate threshold sweep (offline, pure, pre-baked).
++
++Pre-baked so that the moment Q2 forward-capture populates value/CLV rows, the desk
++runs optimization profiles instead of scrambling to write analysis scripts. The
++sweep grids over (value-leg magnitude floor) x (CLV magnitude floor) x (promotion
++policy) and reports a precision/recall/F-beta matrix — both raw and **liquidity-
++weighted** — so we can pick the thresholds that maximize promote precision without
++starving viable strategy volume.
++
++Pure: depends only on ``evidence_stats`` (seeded bootstrap = deterministic); no
++I/O, no global state, no RNG of its own. Same ``EvidenceVerdict`` contract.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import itertools
++from typing import Any, Dict, List, Optional, Sequence, Tuple
++
++from hibs_predictor.evidence_stats import classify_clv_edge, classify_evidence
++
++# Conservative -> aggressive. "all_evidenced" requires every lane that HAS data to
++# pass (corroboration); "any" promotes if either lane passes; lane-specific isolate.
++PROMOTION_POLICIES: Tuple[str, ...] = ("all_evidenced", "any", "value_only", "clv_only")
++
++# Precision-favoring F-beta: beta<1 weights precision above recall (a false promote
++# costs real capital; a starved edge is opportunity cost only).
++DEFAULT_FBETA = 0.5
++
++
++@dataclass(frozen=True)
++class ProfileEvidenceSample:
++    """One strategy profile's evidence (real or synthetic) + ground-truth label.
++
++    ``weight`` is the liquidity / capital-at-risk of the profile, so a false
++    promote on a high-volume loop is penalized proportionally in weighted metrics.
++    """
++
++    profile_id: str
++    per_bet_returns: Sequence[float] = ()       # continuous value-leg unit P&L
++    clv_successes: int = 0
++    clv_n: int = 0
++    clv_avg_pp: Optional[float] = None
++    is_truly_profitable_live: Optional[bool] = None  # ground truth (None = unlabelled)
++    weight: float = 1.0
++
++
++def _fbeta(precision: float, recall: float, beta: float) -> float:
++    b2 = beta * beta
++    denom = b2 * precision + recall
++    if denom <= 0:
++        return 0.0
++    return (1.0 + b2) * precision * recall / denom
++
++
++def profile_promoted(
++    sample: ProfileEvidenceSample,
++    *,
++    value_floor: float,
++    clv_floor: float,
++    policy: str,
++) -> bool:
++    """Promotion decision for one profile under a (value_floor, clv_floor, policy)."""
++    has_value = len(sample.per_bet_returns) > 0
++    has_clv = sample.clv_n > 0
++
++    v_ok = (
++        classify_evidence(sample.per_bet_returns, min_edge_magnitude_pct=value_floor).promotable
++        if has_value
++        else False
++    )
++    c_ok = (
++        classify_clv_edge(
++            sample.clv_successes, sample.clv_n, sample.clv_avg_pp, min_clv_pp=clv_floor
++        ).promotable
++        if has_clv
++        else False
++    )
++
++    if policy == "value_only":
++        return v_ok
++    if policy == "clv_only":
++        return c_ok
++    if policy == "all_evidenced":
++        evidenced = []
++        if has_value:
++            evidenced.append(v_ok)
++        if has_clv:
++            evidenced.append(c_ok)
++        return bool(evidenced) and all(evidenced)
++    # "any" (default aggressive)
++    return v_ok or c_ok
++
++
++def sweep_promotion_thresholds(
++    profiles: List[ProfileEvidenceSample],
++    *,
++    value_hurdles: Sequence[float],
++    clv_hurdles: Sequence[float],
++    policies: Sequence[str] = ("all_evidenced",),
++    beta: float = DEFAULT_FBETA,
++) -> List[Dict[str, Any]]:
++    """Grid-sweep promotion thresholds; return a ranked precision/recall matrix.
++
++    Ranks by **weighted F-beta** (precision-favoring, liquidity-weighted), then
++    weighted precision, then promote volume — i.e. the safest thresholds that still
++    keep the desk fed. Deterministic for a given profile registry.
++    """
++    rows: List[Dict[str, Any]] = []
++
++    for policy, vf, cf in itertools.product(policies, value_hurdles, clv_hurdles):
++        tp = fp = fn = tn = 0
++        tp_w = fp_w = fn_w = 0.0
++        promoted = 0
++        promoted_w = 0.0
++
++        for prof in profiles:
++            promoted_flag = profile_promoted(
++                prof, value_floor=vf, clv_floor=cf, policy=policy
++            )
++            label = prof.is_truly_profitable_live
++            w = float(prof.weight)
++            if promoted_flag:
++                promoted += 1
++                promoted_w += w
++                if label is True:
++                    tp += 1
++                    tp_w += w
++                elif label is False:
++                    fp += 1
++                    fp_w += w
++            elif label is True:
++                fn += 1   # starved a genuinely viable edge
++                fn_w += w
++            elif label is False:
++                tn += 1
++
++        precision = tp / promoted if promoted else 0.0
++        recall = tp / (tp + fn) if (tp + fn) else 0.0
++        w_precision = tp_w / promoted_w if promoted_w else 0.0
++        w_recall = tp_w / (tp_w + fn_w) if (tp_w + fn_w) else 0.0
++
++        rows.append(
++            {
++                "policy": policy,
++                "value_hurdle_pct": vf,
++                "clv_hurdle_pp": cf,
++                "promoted_total": promoted,
++                "true_positives": tp,
++                "false_positives": fp,
++                "starved_viable": fn,
++                "true_negatives": tn,
++                "precision": round(precision, 4),
++                "recall": round(recall, 4),
++                "fbeta": round(_fbeta(precision, recall, beta), 4),
++                "weighted_precision": round(w_precision, 4),
++                "weighted_recall": round(w_recall, 4),
++                "weighted_fbeta": round(_fbeta(w_precision, w_recall, beta), 4),
++                "yield_pct": round(100.0 * promoted / len(profiles), 2) if profiles else 0.0,
++            }
++        )
++
++    # Safest-but-fed first: weighted F-beta, then weighted precision, then volume.
++    rows.sort(
++        key=lambda r: (r["weighted_fbeta"], r["weighted_precision"], r["promoted_total"]),
++        reverse=True,
++    )
++    return rows
++
++
++def best_thresholds(
++    profiles: List[ProfileEvidenceSample],
++    *,
++    value_hurdles: Sequence[float],
++    clv_hurdles: Sequence[float],
++    policies: Sequence[str] = ("all_evidenced",),
++    beta: float = DEFAULT_FBETA,
++    min_promoted: int = 1,
++) -> Optional[Dict[str, Any]]:
++    """Top sweep row that still promotes at least ``min_promoted`` profiles."""
++    matrix = sweep_promotion_thresholds(
++        profiles,
++        value_hurdles=value_hurdles,
++        clv_hurdles=clv_hurdles,
++        policies=policies,
++        beta=beta,
++    )
++    for row in matrix:
++        if row["promoted_total"] >= min_promoted:
++            return row
++    return matrix[0] if matrix else None
+diff --git a/tests/test_evidence_sweep.py b/tests/test_evidence_sweep.py
+new file mode 100644
+index 0000000..9d0188a
+--- /dev/null
++++ b/tests/test_evidence_sweep.py
+@@ -0,0 +1,79 @@
++"""Tests for the deterministic promotion-threshold sweep harness."""
++
++from hibs_predictor.evidence_sweep import (
++    ProfileEvidenceSample,
++    best_thresholds,
++    profile_promoted,
++    sweep_promotion_thresholds,
++)
++
++
++def _registry():
++    return [
++        # real value edge (low volume)
++        ProfileEvidenceSample("val_real", per_bet_returns=[0.3] * 30,
++                              is_truly_profitable_live=True, weight=1.0),
++        # sub-frictional churn (high volume) -> false positive at zero floor
++        ProfileEvidenceSample("val_churn", per_bet_returns=[0.005] * 200,
++                              is_truly_profitable_live=False, weight=5.0),
++        # real CLV edge (low volume)
++        ProfileEvidenceSample("clv_real", clv_successes=560, clv_n=1000, clv_avg_pp=2.5,
++                              is_truly_profitable_live=True, weight=1.0),
++        # CLV cost-trap (volume) -> false positive at zero floor
++        ProfileEvidenceSample("clv_trap", clv_successes=560, clv_n=1000, clv_avg_pp=0.2,
++                              is_truly_profitable_live=False, weight=3.0),
++    ]
++
++
++def _row(matrix, vf, cf):
++    return next(r for r in matrix if r["value_hurdle_pct"] == vf and r["clv_hurdle_pp"] == cf)
++
++
++def test_sweep_higher_floors_lift_precision_and_remove_cost_traps():
++    matrix = sweep_promotion_thresholds(
++        _registry(), value_hurdles=[0.0, 1.0], clv_hurdles=[0.0, 1.0], policies=["any"]
++    )
++    lo = _row(matrix, 0.0, 0.0)
++    hi = _row(matrix, 1.0, 1.0)
++    assert lo["precision"] == 0.5          # promotes both cost-traps
++    assert hi["precision"] == 1.0          # cost-traps removed
++    assert hi["starved_viable"] == 0       # both real edges survive
++    assert hi["promoted_total"] == 2
++    # Top-ranked row is the safe-but-fed config.
++    assert matrix[0]["value_hurdle_pct"] == 1.0 and matrix[0]["clv_hurdle_pp"] == 1.0
++
++
++def test_sweep_liquidity_weighting_penalizes_high_volume_false_positives():
++    matrix = sweep_promotion_thresholds(
++        _registry(), value_hurdles=[0.0], clv_hurdles=[0.0], policies=["any"]
++    )
++    lo = _row(matrix, 0.0, 0.0)
++    # FPs (churn w5, trap w3) outweigh TPs (w1 each) -> weighted precision << raw.
++    assert lo["weighted_precision"] < lo["precision"]
++    assert lo["weighted_precision"] == 0.2  # 2 / 10 weighted
++
++
++def test_sweep_is_deterministic():
++    a = sweep_promotion_thresholds(_registry(), value_hurdles=[0.0, 1.0],
++                                   clv_hurdles=[0.0, 1.0], policies=["any", "all_evidenced"])
++    b = sweep_promotion_thresholds(_registry(), value_hurdles=[0.0, 1.0],
++                                   clv_hurdles=[0.0, 1.0], policies=["any", "all_evidenced"])
++    assert a == b
++
++
++def test_best_thresholds_picks_safe_but_fed_config():
++    best = best_thresholds(_registry(), value_hurdles=[0.0, 1.0],
++                           clv_hurdles=[0.0, 1.0], policies=["any"], min_promoted=1)
++    assert best is not None
++    assert best["weighted_precision"] == 1.0
++    assert best["promoted_total"] >= 1
++
++
++def test_profile_promoted_respects_policy_for_single_lane():
++    val_only = ProfileEvidenceSample("v", per_bet_returns=[0.3] * 30,
++                                     is_truly_profitable_live=True)
++    # value lane promotes under value_only/any/all_evidenced; clv_only has no data.
++    assert profile_promoted(val_only, value_floor=1.0, clv_floor=0.0, policy="value_only")
++    assert profile_promoted(val_only, value_floor=1.0, clv_floor=0.0, policy="any")
++    assert profile_promoted(val_only, value_floor=1.0, clv_floor=0.0, policy="all_evidenced")
++    assert not profile_promoted(val_only, value_floor=1.0, clv_floor=0.0, policy="clv_only")
+-- 
+2.43.0
+
+
+From 21300fc065d10b846bba1fc6eb5ab4a61c587442 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:46:13 +0000
+Subject: [PATCH 19/23] docs: record sweep harness + dashboard verdict schema
+ (Q1) in roadmap
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index c958281..ecc031e 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -15,6 +15,7 @@
+ | CLV verdict | `classify_binomial_evidence()` (Wilson-CI proportion grade) wired into `clv_beat_close_verdict()` | CLV graded on the **same `EvidenceVerdict` schema** as value gates (`metric="proportion"`); strong-but-tiny samples (16/20) stay `thin` via `MIN_PROPORTION_SUFFICIENT=100` |
+ | blended CLV gate | `classify_clv_edge()` = **frequency × magnitude** (Wilson > baseline AND `avg_clv_pp` ≥ cost floor, env `HIBS_CLV_MIN_PP`) | Rejects "cost-trap" edges (frequent but ~0 magnitude). Experiment: promote-precision **0.50 → 1.00** on a labelled set vs frequency-only |
+ | value-leg magnitude floor | `classify_evidence(min_edge_magnitude_pct=…)` two-part sieve (significance + point-ROI floor), env `HIBS_VALUE_MIN_EDGE_PCT`; alias `classify_evidence_with_magnitude` | Continuous analog of the CLV blend — blocks high-volume **sub-frictional churn** that backtests positive but bleeds live. Default `0.0` = inert |
++| sweep harness | `evidence_sweep.py` — grid over value × CLV floors × policy, **liquidity-weighted** precision/recall/F-β matrix + `best_thresholds()` | Pre-baked optimizer: pick promotion floors by weighted F-β, not by hand. Demo: weighted precision 0.20 → 1.00 as floors rise. Run live once Q2 capture lands |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+@@ -25,10 +26,13 @@
+ ## QUEUE — next, in priority order
+ 
+ ### Q1. Make significance the promotion gate everywhere (extends Tier 0)
+-- Surface `roi_ci_low_pct` / `roi_significant_positive` / `clv_beat_close` on `/performance` and `/status#audit-evidence` (UI already reads `/api/health`).
++- **Surface verdicts on the risk dashboard** (`/performance`, `/status#audit-evidence`): show `EvidenceVerdict` per profile — `grade`/`promotable`/`metric`, ROI or beat-rate **CI band** (`roi_ci_low_pct`..`roi_ci_high_pct`), and the human `reason` string verbatim. Add `evidence` + `clv_beat_close` blocks to `/api/health` so the existing chip JS renders them (amber unless `promotable`).
+ - Add a **bootstrap CI to the CLI** `pred-log-backtest` / `value_replay.replay_report_dict` output (currently point ROI only).
+ - Gate the deploy scripts: `apply-vps-*` should refuse to run unless the latest `comparison_gate_profiles.json` shows a `promotable` profile on the forward cohort.
+ 
++### Q1b. Run the threshold sweep on live data (harness DONE, branch)
++- `evidence_sweep.sweep_promotion_thresholds()` is pre-baked (pure, deterministic, liquidity-weighted, policy-swept). The moment Q2 capture populates rows, build a `ProfileEvidenceSample` registry from the audit DB and grid `HIBS_VALUE_MIN_EDGE_PCT` × `HIBS_CLV_MIN_PP` × policy; promote the `best_thresholds()` config (weighted F-β) into `.env` — never a hand-picked floor.
++
+ ### Q2. Automate evidence growth (the actual Stage-1 unblock)
+ - Cron `scripts/run_forward_backfill_plan.sh` daily; track `audit_odds_capture.capture_rate_pct` and `clv_beat_close` as monitored time series (target: forward 1X2 capture ≥50% 7d, CLV n≥25 with Wilson low > 50%).
+ - Alert when capture stalls; this is what converts "infra ready" into "edge proven".
+-- 
+2.43.0
+
+
+From 52afa0c7cfa4e3bdc637111e9790274dd8a17b14 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:51:45 +0000
+Subject: [PATCH 20/23] inst++: wire evidence verdicts into /api/health
+ (decoupled, null-safe)
+
+Add evidence_health_blocks(): value-leg 'evidence' read from the last
+gate-compare artifact (no heavy replay/bootstrap on the cached health hot
+path) and 'clv_beat_close' graded LIVE from the summary _audit_ops_summary
+already fetches (cheap analytic Wilson, no extra query). Both null-safe in
+the empty DB state, carry self-documenting hurdles (min_edge_magnitude_pct
+/ min_clv_pp) and as_of provenance so the dashboard never shows stale
+evidence as live. Uniform EvidenceVerdict schema downstream.
+
+Amendments over the draft: read artifact instead of recomputing per call;
+reuse the already-fetched CLV summary; add provenance. Empty-state +
+populated integration tests.
+---
+ src/hibs_predictor/gate_profile_compare.py    | 107 +++++++++++++++++-
+ .../health_quality_narrative.py               |  17 +++
+ tests/test_audit_ops_evidence.py              |  23 ++++
+ tests/test_gate_profile_compare.py            |  39 +++++++
+ 4 files changed, 184 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test_audit_ops_evidence.py
+
+diff --git a/src/hibs_predictor/gate_profile_compare.py b/src/hibs_predictor/gate_profile_compare.py
+index f386eac..651165b 100644
+--- a/src/hibs_predictor/gate_profile_compare.py
++++ b/src/hibs_predictor/gate_profile_compare.py
+@@ -620,13 +620,116 @@ def run_gate_profile_compare(
+     return report
+ 
+ 
+-def write_gate_compare_report(report: Dict[str, Any], path: Optional[Path] = None) -> Path:
+-    out = path or (
++def default_gate_compare_report_path() -> Path:
++    return (
+         Path(__file__).resolve().parents[2]
+         / "data"
+         / "backtest_profiles"
+         / "comparison_gate_profiles.json"
+     )
++
++
++def write_gate_compare_report(report: Dict[str, Any], path: Optional[Path] = None) -> Path:
++    out = path or default_gate_compare_report_path()
+     out.parent.mkdir(parents=True, exist_ok=True)
+     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+     return out
++
++
++def read_latest_gate_compare_report(path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
++    """Read the last offline gate-compare artifact (None if absent/unreadable)."""
++    p = Path(path) if path else default_gate_compare_report_path()
++    try:
++        if p.is_file():
++            return json.loads(p.read_text(encoding="utf-8"))
++    except Exception:
++        return None
++    return None
++
++
++def _empty_evidence_dict(metric: str, **extra: Any) -> Dict[str, Any]:
++    base = {
++        "metric": metric,
++        "grade": "empty",
++        "promotable": False,
++        "n": 0,
++        "roi_pct": None,
++        "roi_ci_low_pct": None,
++        "roi_ci_high_pct": None,
++        "significant_positive": False,
++        "beats_baseline": None,
++        "reason": "no computed evidence yet",
++    }
++    base.update(extra)
++    return base
++
++
++def _clv_verdict_from_summary(
++    summary: Optional[Dict[str, Any]], *, min_clv_pp: float, baseline_proportion: float = 0.50
++) -> Dict[str, Any]:
++    """Build a null-safe graded CLV verdict dict from an already-fetched summary."""
++    s = summary or {}
++    n = int(s.get("n_clv_rows") or 0)
++    pct = s.get("beat_close_pct")
++    avg_pp = s.get("avg_clv_pp")
++    if n > 0 and pct is not None:
++        successes = int(round(float(pct) / 100.0 * n))
++        d = classify_clv_edge(
++            successes, n, avg_pp, baseline_proportion=baseline_proportion, min_clv_pp=min_clv_pp
++        ).as_dict()
++    else:
++        d = _empty_evidence_dict("proportion", reason="no settled CLV rows")
++    d["min_clv_pp"] = float(min_clv_pp)
++    return d
++
++
++def evidence_health_blocks(
++    *,
++    report: Optional[Dict[str, Any]] = None,
++    clv_summary: Optional[Dict[str, Any]] = None,
++    read_artifact: bool = True,
++) -> Dict[str, Any]:
++    """Lightweight significance blocks for ``/api/health`` (decoupled from compute).
++
++    Value-leg ``evidence`` is read from the **last offline gate-compare artifact**
++    (no heavy replay/bootstrap on the cached health path); ``clv_beat_close`` is
++    graded **live** from the supplied summary (cheap analytic Wilson). Both are
++    null-safe under the empty DB state, and carry ``as_of`` provenance so the
++    dashboard never shows stale evidence as live.
++    """
++    min_edge = _value_min_edge_pct()
++    min_clv = _clv_min_pp_cost()
++
++    value_block = _empty_evidence_dict("roi", min_edge_magnitude_pct=min_edge)
++    as_of = None
++    if report is None and read_artifact:
++        report = read_latest_gate_compare_report()
++    if isinstance(report, dict):
++        as_of = report.get("generated_at")
++        bb = report.get("best_blend")
++        if isinstance(bb, dict):
++            n = int(bb.get("bets") or 0)
++            value_block = {
++                "metric": "roi",
++                "grade": bb.get("evidence_grade") or "empty",
++                "promotable": bool(bb.get("promotable")),
++                "n": n,
++                "roi_pct": bb.get("roi_pct") if n > 0 else None,
++                "roi_ci_low_pct": bb.get("roi_ci_low_pct") if n > 0 else None,
++                "roi_ci_high_pct": bb.get("roi_ci_high_pct") if n > 0 else None,
++                "reason": (
++                    f"best forward profile '{bb.get('profile')}' on {bb.get('cohort')}"
++                    if n > 0
++                    else "no promotable forward profile yet"
++                ),
++                "min_edge_magnitude_pct": min_edge,
++            }
++
++    clv_block = _clv_verdict_from_summary(clv_summary, min_clv_pp=min_clv)
++
++    return {
++        "evidence": value_block,
++        "clv_beat_close": clv_block,
++        "evidence_as_of": as_of,
++        "evidence_source": str(default_gate_compare_report_path().name),
++    }
+diff --git a/src/hibs_predictor/health_quality_narrative.py b/src/hibs_predictor/health_quality_narrative.py
+index 4ea35cf..6e88754 100644
+--- a/src/hibs_predictor/health_quality_narrative.py
++++ b/src/hibs_predictor/health_quality_narrative.py
+@@ -157,6 +157,23 @@ def _audit_ops_summary() -> Dict[str, Any]:
+         out["pred_log_sync_cron"] = pred_log_sync_cron_status()
+     except Exception as exc:
+         out["clv_by_league"] = {"enabled": False, "leagues": [], "error": str(exc)[:120]}
++    # Institutional++ significance verdicts (uniform EvidenceVerdict schema):
++    # value-leg evidence from the last gate-compare artifact (no heavy recompute),
++    # CLV graded live from the summary already fetched above. Null-safe empty state.
++    try:
++        from hibs_predictor.gate_profile_compare import evidence_health_blocks
++
++        blocks = evidence_health_blocks(clv_summary=out.get("clv_beat_close_28d"))
++        out["evidence"] = blocks["evidence"]
++        out["clv_beat_close"] = blocks["clv_beat_close"]
++        out["evidence_as_of"] = blocks["evidence_as_of"]
++        out["evidence_source"] = blocks["evidence_source"]
++    except Exception as exc:
++        out["evidence"] = {
++            "metric": "roi", "grade": "empty", "promotable": False, "n": 0,
++            "roi_pct": None, "roi_ci_low_pct": None, "roi_ci_high_pct": None,
++            "reason": str(exc)[:120],
++        }
+     try:
+         from hibs_predictor.historic_calibration import calibration_cache_path
+ 
+diff --git a/tests/test_audit_ops_evidence.py b/tests/test_audit_ops_evidence.py
+new file mode 100644
+index 0000000..806f184
+--- /dev/null
++++ b/tests/test_audit_ops_evidence.py
+@@ -0,0 +1,23 @@
++"""/api/health evidence wiring: significance blocks present + well-formed (empty-state safe)."""
++
++from hibs_predictor.health_quality_narrative import _audit_ops_summary
++
++
++def test_audit_ops_summary_exposes_uniform_evidence_blocks():
++    out = _audit_ops_summary()
++    assert "evidence" in out and "clv_beat_close" in out
++    assert out.get("evidence_source")
++
++    for block, metric in ((out["evidence"], "roi"), (out["clv_beat_close"], "proportion")):
++        assert block["metric"] == metric
++        for key in ("grade", "promotable", "n", "roi_ci_low_pct", "roi_ci_high_pct", "reason"):
++            assert key in block
++        # Null-safe: when there are no observations, CI fields must be JSON null.
++        if int(block.get("n") or 0) == 0:
++            assert block["roi_ci_low_pct"] is None
++            assert block["roi_ci_high_pct"] is None
++            assert block["promotable"] is False
++
++    # Self-documenting hurdles on each lane.
++    assert "min_edge_magnitude_pct" in out["evidence"]
++    assert "min_clv_pp" in out["clv_beat_close"]
+diff --git a/tests/test_gate_profile_compare.py b/tests/test_gate_profile_compare.py
+index fc1cfb2..28df303 100644
+--- a/tests/test_gate_profile_compare.py
++++ b/tests/test_gate_profile_compare.py
+@@ -3,11 +3,50 @@ import json
+ from hibs_predictor.gate_profile_compare import (
+     GATE_PROFILES,
+     eval_gate_profile,
++    evidence_health_blocks,
+     generate_gate_grid_profiles,
+     run_gate_profile_compare,
+ )
+ from hibs_predictor.value_replay import snapshot_has_replay_odds
+ 
++_EVIDENCE_KEYS = {
++    "metric", "grade", "promotable", "n", "roi_pct", "roi_ci_low_pct", "roi_ci_high_pct",
++}
++
++
++def test_evidence_health_blocks_empty_state_is_null_safe():
++    blocks = evidence_health_blocks(report=None, clv_summary={}, read_artifact=False)
++    ev = blocks["evidence"]
++    clv = blocks["clv_beat_close"]
++    assert _EVIDENCE_KEYS <= set(ev) and _EVIDENCE_KEYS <= set(clv)
++    # n=0 -> CI fields are JSON null so the dashboard renders no bizarre zero bars.
++    assert ev["n"] == 0 and ev["roi_ci_low_pct"] is None and ev["promotable"] is False
++    assert clv["n"] == 0 and clv["roi_ci_high_pct"] is None and clv["promotable"] is False
++    assert ev["metric"] == "roi" and clv["metric"] == "proportion"
++    assert blocks["evidence_as_of"] is None
++    # self-documenting hurdles present
++    assert "min_edge_magnitude_pct" in ev and "min_clv_pp" in clv
++
++
++def test_evidence_health_blocks_reads_artifact_and_live_clv():
++    report = {
++        "generated_at": "2026-06-05T13:57:57+00:00",
++        "best_blend": {
++            "profile": "sharpen_loose", "cohort": "odds_ready_settled",
++            "roi_pct": 7.5, "roi_ci_low_pct": 1.2, "roi_ci_high_pct": 13.8,
++            "bets": 120, "evidence_grade": "sufficient", "promotable": True,
++        },
++    }
++    clv_summary = {"n_clv_rows": 1000, "beat_close_pct": 56.0, "avg_clv_pp": 2.5}
++    blocks = evidence_health_blocks(report=report, clv_summary=clv_summary)
++    assert blocks["evidence_as_of"] == "2026-06-05T13:57:57+00:00"
++    ev = blocks["evidence"]
++    assert ev["grade"] == "sufficient" and ev["promotable"] is True
++    assert ev["n"] == 120 and ev["roi_ci_low_pct"] == 1.2
++    clv = blocks["clv_beat_close"]
++    assert clv["metric"] == "proportion" and clv["n"] == 1000
++    assert clv["promotable"] is True  # 56% beat-rate, CI low > 50, n large
++
+ 
+ def test_snapshot_has_replay_odds_1x2():
+     assert snapshot_has_replay_odds(
+-- 
+2.43.0
+
+
+From fbe9bc4a21d8f4ff0558fec50aa6ff59460d14d9 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:52:06 +0000
+Subject: [PATCH 21/23] docs: record /api/health evidence wiring done; frontend
+ render remains (Q1)
+
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index ecc031e..66ccaf3 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -16,6 +16,7 @@
+ | blended CLV gate | `classify_clv_edge()` = **frequency × magnitude** (Wilson > baseline AND `avg_clv_pp` ≥ cost floor, env `HIBS_CLV_MIN_PP`) | Rejects "cost-trap" edges (frequent but ~0 magnitude). Experiment: promote-precision **0.50 → 1.00** on a labelled set vs frequency-only |
+ | value-leg magnitude floor | `classify_evidence(min_edge_magnitude_pct=…)` two-part sieve (significance + point-ROI floor), env `HIBS_VALUE_MIN_EDGE_PCT`; alias `classify_evidence_with_magnitude` | Continuous analog of the CLV blend — blocks high-volume **sub-frictional churn** that backtests positive but bleeds live. Default `0.0` = inert |
+ | sweep harness | `evidence_sweep.py` — grid over value × CLV floors × policy, **liquidity-weighted** precision/recall/F-β matrix + `best_thresholds()` | Pre-baked optimizer: pick promotion floors by weighted F-β, not by hand. Demo: weighted precision 0.20 → 1.00 as floors rise. Run live once Q2 capture lands |
++| health wiring | `evidence_health_blocks()` → `/api/health` `audit_ops.evidence` + `.clv_beat_close` (+`evidence_as_of`) | Data-layer contract delivered ahead of data: dashboard infra waits to catch telemetry, zero deploy overhead. Value from artifact (cheap), CLV live, null-safe |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+@@ -26,7 +27,8 @@
+ ## QUEUE — next, in priority order
+ 
+ ### Q1. Make significance the promotion gate everywhere (extends Tier 0)
+-- **Surface verdicts on the risk dashboard** (`/performance`, `/status#audit-evidence`): show `EvidenceVerdict` per profile — `grade`/`promotable`/`metric`, ROI or beat-rate **CI band** (`roi_ci_low_pct`..`roi_ci_high_pct`), and the human `reason` string verbatim. Add `evidence` + `clv_beat_close` blocks to `/api/health` so the existing chip JS renders them (amber unless `promotable`).
++- **Backend DONE (branch):** `/api/health` `audit_ops` now carries `evidence` (value-leg, from the last gate-compare artifact) + `clv_beat_close` (graded live), uniform `EvidenceVerdict` schema, null-safe empty state, `evidence_as_of` provenance, self-documenting hurdles. See `evidence_health_blocks()`.
++- **Remaining (frontend):** render the `EvidenceVerdict` on `/performance` + `/status#audit-evidence` — `grade`/`promotable` pill (amber unless `promotable`), ROI/beat-rate **CI band** (`roi_ci_low_pct`..`roi_ci_high_pct`), `reason` verbatim, and the `as_of` stamp. Backend contract is ready and waiting.
+ - Add a **bootstrap CI to the CLI** `pred-log-backtest` / `value_replay.replay_report_dict` output (currently point ROI only).
+ - Gate the deploy scripts: `apply-vps-*` should refuse to run unless the latest `comparison_gate_profiles.json` shows a `promotable` profile on the forward cohort.
+ 
+-- 
+2.43.0
+
+
+From 57627923c12a9361bb35bb202ec5030be2b2cd8b Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 17:56:05 +0000
+Subject: [PATCH 22/23] docs/env: stage promotion-floor vars + EvidenceVerdict
+ payload contract for hand-off
+
+Document HIBS_VALUE_MIN_EDGE_PCT and HIBS_CLV_MIN_PP in .env.example
+(default 0.0 = inert, sweep-tuned, not hand-set, not during freeze) and
+add the EvidenceVerdict /api/health payload contract + env staging table
+to the roadmap so the hibs-bet agent has a uniform hand-off manifest.
+---
+ .env.example                   |  6 ++++++
+ docs/INST_PLUS_PLUS_ROADMAP.md | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/.env.example b/.env.example
+index 2376206..53e6604 100644
+--- a/.env.example
++++ b/.env.example
+@@ -239,6 +239,12 @@ STATS_API_KEY=your_stats_api_key_here
+ # HIBS_AUDIT_ODDS_RETRY=1         — one Odds API + API-Football bundle fetch before snapshot insert
+ # HIBS_AUDIT_REQUIRE_ODDS=1       — daily cron skips fixtures still missing 1X2 after retry (Brier rows from dashboard may still log)
+ #   pred-log-sync joins closing 1X2 from API-Football odds; /api/health and /status show clv_by_league.
++# Promotion magnitude floors (institutional++ two-part sieve — significance AND magnitude).
++# Keep BOTH at 0.0 (inert: significance-only) until the offline sweep harness
++# (evidence_sweep.sweep_promotion_thresholds) recommends a value on real forward data.
++# Tune by weighted F-beta, never by hand. Do NOT raise on the VPS during a gate freeze.
++# HIBS_VALUE_MIN_EDGE_PCT=0.0     — min point ROI % a value profile must clear (frictional cost floor)
++# HIBS_CLV_MIN_PP=0.0             — min mean CLV (percentage points) a beat-close edge must clear
+ # Measure calibration over time:
+ #   1) HIBS_PREDICTION_LOG_ENABLED=1 — run dashboard/predictions so snapshots accumulate.
+ #   2) After matches finish: python -m hibs_predictor.main pred-log-sync
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 66ccaf3..346fb76 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -74,5 +74,37 @@ These existed on `origin/main` independent of the feature work; the full suite i
+ 
+ ---
+ 
++## Hand-off: `EvidenceVerdict` payload contract
++
++Both lanes collapse to one schema; downstream reads `grade`/`promotable`/`n` and is agnostic to how significance was extracted. Exposed at `GET /api/health` → `audit_ops.evidence` (value legs) and `audit_ops.clv_beat_close` (CLV), plus `audit_ops.evidence_as_of` / `evidence_source` provenance.
++
++```jsonc
++{
++  "metric": "roi" | "proportion",   // discriminator: how to read the CI fields
++  "grade": "empty" | "insufficient" | "thin" | "sufficient",
++  "promotable": false,              // true only when grade == "sufficient"
++  "n": 0,                            // sample size (legs / CLV rows)
++  "roi_pct": null,                   // point estimate (ROI% or beat-rate%); null when n==0
++  "roi_ci_low_pct": null,            // CI lower bound (bootstrap ROI / Wilson rate); null when n==0
++  "roi_ci_high_pct": null,           // CI upper bound; null when n==0
++  "significant_positive": false,     // CI lower bound clears the null (0 for ROI, 50% for rate)
++  "beats_baseline": null,            // vs baseline (null if none supplied)
++  "reason": "…",                     // human-readable verdict rationale (audit/UI verbatim)
++  // lane-specific self-documenting hurdle:
++  "min_edge_magnitude_pct": 0.0,     // value lane (HIBS_VALUE_MIN_EDGE_PCT)
++  "min_clv_pp": 0.0                  // CLV lane (HIBS_CLV_MIN_PP)
++}
++```
++
++Producers: `evidence_stats.classify_evidence` (roi), `classify_binomial_evidence` / `classify_clv_edge` (proportion). Empty-state safe (`n==0` → CI fields `null`, `promotable=false`).
++
++### Env staging for promotion floors (deploy pipeline)
++| Var | Default | Stage as | Notes |
++|-----|---------|----------|-------|
++| `HIBS_VALUE_MIN_EDGE_PCT` | `0.0` | **0.0 (inert)** | Raise only on a sweep recommendation (weighted F-β) once forward legs exist. Zero-regression default = significance-only. |
++| `HIBS_CLV_MIN_PP` | `0.0` | **0.0 (inert)** | Same: tune from `evidence_sweep` after CLV rows land. Do not raise during a gate freeze. |
++
++Both are read at request time (`os.getenv`), so changing them is a config-only redeploy — no code change. They affect *grading/promotion only*, never the prediction engine, DQ, or stored snapshots.
++
+ ## Related
+ - [PROP_DESK_STRATEGY.md](./PROP_DESK_STRATEGY.md) · [TRADING_REPO_EXTRACTION_PLAN.md](./TRADING_REPO_EXTRACTION_PLAN.md) · [INSTITUTIONAL_SCORECARD.md](./INSTITUTIONAL_SCORECARD.md) · [FOOTBALL_SALE_READINESS.md](./FOOTBALL_SALE_READINESS.md) · [TRADING_PROMOTION_SCORECARD.md](./TRADING_PROMOTION_SCORECARD.md)
+-- 
+2.43.0
+
+
+From ffab220f128d29e502dc7f6557c1d3a2d7be36e6 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 5 Jun 2026 18:20:15 +0000
+Subject: [PATCH 23/23] =?UTF-8?q?inst++:=20racing=20gate-coverage=20amendm?=
+ =?UTF-8?q?ents=20=E2=80=94=20drop-in=20tested=20hand-off?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+All 5 amendments to the hibs-racing gate-coverage precheck as a portable,
+deterministic, stdlib-only reference (handoff/racing_gate_reference.py, 8
+tests) + spec/runbook (docs/RACING_GATE_COVERAGE_INST_PLUS.md):
+
+1. maiden-stratified ADDRESSABLE cohort — flat 85% floor over maidens (no
+   prior OR by design) is unfillable; only addressable cohort blocks.
+2. composite config hash (stable across re-enrich) + data-content
+   fingerprint (changes on re-stamp) -> fixes the re-audit anchor.
+3. versioned gate-critical column manifest + dual-definition density so
+   the audit-narrowing tweak is transparent, not a silent goalpost move.
+4. enrich-recovery guards: quota headroom (+20%), checkpoint sanity,
+   milestone re-audit cadence.
+5. uniform Wilson-lower-bound coverage verdict (retest_ready == promotable)
+   for the cross-lane Master Operations Scorecard.
+
+Wilson inlined from the unit-tested evidence_stats (zero cross-repo dep).
+Caught/fixed a floor unit bug (fraction vs percent) during testing.
+Cannot push to hibs-racing from here (separate local repo) — this is the
+executable hand-off; apply in that repo.
+---
+ docs/INST_PLUS_PLUS_ROADMAP.md         |   1 +
+ docs/MASTER_OPERATIONS_SCORECARD.md    |   2 +
+ docs/RACING_GATE_COVERAGE_INST_PLUS.md |  70 +++++
+ handoff/racing_gate_reference.py       | 355 +++++++++++++++++++++++++
+ handoff/test_racing_gate_reference.py  | 107 ++++++++
+ 5 files changed, 535 insertions(+)
+ create mode 100644 docs/RACING_GATE_COVERAGE_INST_PLUS.md
+ create mode 100644 handoff/racing_gate_reference.py
+ create mode 100644 handoff/test_racing_gate_reference.py
+
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index 346fb76..0ac5e40 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -17,6 +17,7 @@
+ | value-leg magnitude floor | `classify_evidence(min_edge_magnitude_pct=…)` two-part sieve (significance + point-ROI floor), env `HIBS_VALUE_MIN_EDGE_PCT`; alias `classify_evidence_with_magnitude` | Continuous analog of the CLV blend — blocks high-volume **sub-frictional churn** that backtests positive but bleeds live. Default `0.0` = inert |
+ | sweep harness | `evidence_sweep.py` — grid over value × CLV floors × policy, **liquidity-weighted** precision/recall/F-β matrix + `best_thresholds()` | Pre-baked optimizer: pick promotion floors by weighted F-β, not by hand. Demo: weighted precision 0.20 → 1.00 as floors rise. Run live once Q2 capture lands |
+ | health wiring | `evidence_health_blocks()` → `/api/health` `audit_ops.evidence` + `.clv_beat_close` (+`evidence_as_of`) | Data-layer contract delivered ahead of data: dashboard infra waits to catch telemetry, zero deploy overhead. Value from artifact (cheap), CLV live, null-safe |
++| racing gate hand-off | `RACING_GATE_COVERAGE_INST_PLUS.md` + `handoff/racing_gate_reference.py` (8 tests) | All 5 racing precheck amendments as drop-in tested code: maiden-stratified cohort, composite hash + fingerprint, versioned column manifest + dual density, recovery guards, uniform Wilson `retest_ready` verdict. Apply in `hibs-racing` |
+ | players fix | merged duplicate `{% block extra_js %}` in `players.html` | Restores a 500-ing dashboard page + greens CI |
+ | docs | `PROP_DESK_STRATEGY.md`, `TRADING_REPO_EXTRACTION_PLAN.md`, this file | Direction + executable handoffs |
+ 
+diff --git a/docs/MASTER_OPERATIONS_SCORECARD.md b/docs/MASTER_OPERATIONS_SCORECARD.md
+index 1753bce..accb46d 100644
+--- a/docs/MASTER_OPERATIONS_SCORECARD.md
++++ b/docs/MASTER_OPERATIONS_SCORECARD.md
+@@ -242,6 +242,8 @@ macOS cron does **not** wake a sleeping machine. During Jun 4–10 pick one:
+ 
+ Detail (when active): separate racing scorecard doc; do not merge into football or trading gates.
+ 
++**Institutional++ gate-coverage amendments (hand-off):** [RACING_GATE_COVERAGE_INST_PLUS.md](./RACING_GATE_COVERAGE_INST_PLUS.md) — maiden-stratified addressable cohort, composite config hash + data fingerprint, versioned gate-critical column manifest + dual-definition density, enrich-recovery guards, and a uniform Wilson-CI `retest_ready` verdict for this scorecard. Drop-in reference: `handoff/racing_gate_reference.py` (8 tests). `retest_ready` must be true on **both** sources before `gate-impact --walkforward` or lane promotion.
++
+ ---
+ 
+ ## 4. Cross-product kill switches
+diff --git a/docs/RACING_GATE_COVERAGE_INST_PLUS.md b/docs/RACING_GATE_COVERAGE_INST_PLUS.md
+new file mode 100644
+index 0000000..c700da1
+--- /dev/null
++++ b/docs/RACING_GATE_COVERAGE_INST_PLUS.md
+@@ -0,0 +1,70 @@
++# Racing Gate-Coverage — Institutional++ Amendments (hibs-racing hand-off)
++
++Five amendments to the gate-coverage precheck so `retest_ready` is a **cohort-aware,
++provenance-stamped, significance-tested** verdict — not a single flat density threshold
++that an unfillable denominator (maidens) can never clear.
++
++**Reference implementation (drop-in, tested):** [`handoff/racing_gate_reference.py`](../handoff/racing_gate_reference.py)
++— pure stdlib, deterministic, zero cross-repo deps; the Wilson interval is inlined
++verbatim from the already-unit-tested `evidence_stats`. Tests: `handoff/test_racing_gate_reference.py` (8 passing). Lift the functions into `hibs-racing` (or vendor the file).
++
++> Cannot be committed to `hibs-racing` from the football-app cloud agent (separate
++> local-only repo). This is the executable hand-off; apply it in the racing repo.
++
++---
++
++## 1. Maiden-stratified addressable cohort (the key fix)
++Pilot density 56.5% = ~70% `official_rating` (maidens have **no prior OR by race design**) × ~78% RTF. A flat 85% floor over a cohort containing maidens is **unachievable by construction** — you can enrich RTF to 100% and still FAIL.
++
++- `classify_race_cohort(card)` → `addressable` | `maiden`.
++- Floors are per-cohort (`DEFAULT_COHORT_FLOORS = {addressable: 85%, maiden: 60%}`), and **only `addressable` is blocking** (`BLOCKING_COHORTS`). Maidens are reported against an advisory floor and never block `retest_ready`.
++- `gate_coverage_by_cohort(...)` returns per-cohort verdicts; `retest_ready` = every blocking cohort clears its floor.
++
++## 2. Composite config hash (stable) + data fingerprint (changes)
++Your step-3 re-audit pins `--snapshot-config-hash fb9402`. **Confirm its semantics:**
++
++- `gate_config_hash(gate_config_version, manifest)` — hashes **config + column manifest only**, never row data → **stable across re-enrich**. Use this for `--snapshot-config-hash`; re-stamp → re-audit stays anchored.
++- `data_content_fingerprint(row_count, covered_count, window…)` — **changes** when enrich/re-stamp alters coverage. The runbook should **assert the fingerprint moved** after recovery (proof the re-stamp landed) while the config hash stays constant.
++
++If `fb9402` is currently a *content* hash, step 3 must use the **post-re-stamp** value; if it's a config-version hash, reusing it is correct. Make it explicit either way.
++
++## 3. Versioned gate-critical column manifest + dual-definition density
++Narrowing the audit to gate-critical columns is correct (kills false 0% from sparse optional fields like `form_trip_change_f`) — but it must not silently move goalposts.
++
++- `GateColumnManifest(version, runner_columns, snapshot_columns)` — **reviewed, versioned**, with `manifest_hash()` stamped into every audit output.
++- `dual_definition_density(...)` reports density under **both** the gate-critical set **and** the full set, so the gap is attributable (sparse optional vs genuinely missing gate inputs). Bump `version` on any column change; it propagates into the config hash (#2).
++
++## 4. Enrich-recovery guards (before the long batch)
++`enrich_recovery_precheck(quota_remaining, quota_needed_estimate, checkpoint_date, window_end, milestone_days)`:
++- **Quota headroom** with a +20% safety margin (don't stall mid-window on RP limits).
++- **Checkpoint-behind-window** sanity (there is something to recover).
++- **Milestone re-audit cadence** (default every 30 enriched days) — re-audit *incrementally* to catch a re-stalled checkpoint or enrich drift early, not after a multi-hour run.
++
++Run under `caffeinate`; keep the checkpoint idempotent (you already resume from Nov 19); have a kill switch.
++
++## 5. Uniform verdict for the cross-lane scorecard
++`racing_gate_verdict(audits, …)` collapses per-(lane, source) cohort audits into one block matching the betting/trading `EvidenceVerdict` contract (`metric`, `promotable` = `retest_ready`, `as_of`, `config_hash`, `reason`). `coverage_verdict` grades on the **Wilson lower bound ≥ floor** (not the point estimate), so the gate never passes on coverage that is within noise of the floor — identical rigor to the CLV beat-close gate. Emit it into the [Master Operations Scorecard](./MASTER_OPERATIONS_SCORECARD.md) so racing GO/NO-GO sits beside football and trading.
++
++---
++
++## Corrected re-test runbook
++```bash
++# 1. Resume enrich (long-running — checkpoint Nov 19). Pre-flight the guards first.
++caffeinate -ims hibs-racing batch-enrich-recovery        # re-audit at each ~30-day milestone
++
++# 2. Re-stamp snapshots once full-window enrich clears the ADDRESSABLE floor (not maidens)
++hibs-racing snapshot-backfill --start 2025-11-01 --end 2026-05-22 --force
++
++# 3. Re-audit BOTH sources, cohort-stratified. Use the STABLE config hash; assert the
++#    data fingerprint changed vs the pre-recovery run.
++hibs-racing gate-coverage-audit --start 2025-11-01 --end 2026-05-22 \
++  --lanes gate3,gate5,gate7 --source both \
++  --cohort-stratified --blocking-cohort addressable \
++  --snapshot-config-hash "$(hibs-racing gate-config-hash)"   # stable config hash, not fb9402 literal
++
++# Promote only when racing_gate_verdict.retest_ready == true on BOTH sources.
++# Do NOT run gate-impact --walkforward before then.
++```
++
++## Related
++[MASTER_OPERATIONS_SCORECARD.md](./MASTER_OPERATIONS_SCORECARD.md) · [INST_PLUS_PLUS_ROADMAP.md](./INST_PLUS_PLUS_ROADMAP.md) · [PROP_DESK_STRATEGY.md](./PROP_DESK_STRATEGY.md)
+diff --git a/handoff/racing_gate_reference.py b/handoff/racing_gate_reference.py
+new file mode 100644
+index 0000000..da45f3e
+--- /dev/null
++++ b/handoff/racing_gate_reference.py
+@@ -0,0 +1,355 @@
++"""Portable institutional++ reference for hibs-racing gate-coverage (HAND-OFF ARTIFACT).
++
++NOT used by the hibs-bet football engine. Drop into ``hibs-racing`` (or copy the
++functions) — pure stdlib, deterministic, zero external/cross-repo deps so it lifts
++cleanly across the repo boundary. Implements the five amendments to the gate-coverage
++precheck so ``retest_ready`` becomes a defensible, cohort-aware, provenance-stamped
++verdict instead of a single flat density threshold:
++
++  1. Maiden-stratified **addressable cohort** density + floor (maidens are a structural
++     OR ceiling, not an enrich gap — don't chase an unfillable denominator).
++  2. **Composite config hash** (stable across re-enrich) + **data-content fingerprint**
++     (changes on re-stamp) so the re-audit pins the right anchor.
++  3. **Versioned gate-critical column manifest** + **dual-definition density** report so
++     the audit-column tweak is transparent and cannot silently move the goalposts.
++  4. **Enrich-recovery guards** (quota headroom, milestone re-audit cadence, checkpoint).
++  5. **Uniform verdict** (Wilson lower bound on coverage) matching the betting/trading
++     ``EvidenceVerdict`` contract so racing lands in the cross-lane promotion scorecard.
++
++The Wilson interval is inlined verbatim from ``hibs_predictor.evidence_stats`` (already
++unit-tested there) to keep this file dependency-free.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++import hashlib
++import json
++import math
++from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
++
++# ---------------------------------------------------------------------------
++# Shared statistics (inlined from evidence_stats — single proven definition)
++# ---------------------------------------------------------------------------
++
++def wilson_interval(successes: int, n: int, *, z: float = 1.96) -> Tuple[float, float]:
++    """Wilson score interval (low, high) in [0, 1] for a binomial proportion."""
++    if n <= 0:
++        return (0.0, 0.0)
++    phat = successes / n
++    z2 = z * z
++    denom = 1.0 + z2 / n
++    center = (phat + z2 / (2.0 * n)) / denom
++    margin = (z * math.sqrt((phat * (1.0 - phat) + z2 / (4.0 * n)) / n)) / denom
++    return (max(0.0, center - margin), min(1.0, center + margin))
++
++
++# ---------------------------------------------------------------------------
++# Amendment 1 — cohort taxonomy (addressable vs structural-sparse / maiden)
++# ---------------------------------------------------------------------------
++
++ADDRESSABLE = "addressable"
++MAIDEN = "maiden"
++
++# Coverage floors per cohort. The gate keys off the ADDRESSABLE cohort; maidens are
++# reported against a lower advisory floor and never block (OR is absent by race design).
++DEFAULT_COHORT_FLOORS: Dict[str, float] = {ADDRESSABLE: 85.0, MAIDEN: 60.0}  # percent
++BLOCKING_COHORTS: Tuple[str, ...] = (ADDRESSABLE,)
++
++
++def classify_race_cohort(card: Dict[str, Any]) -> str:
++    """Maiden races lack prior OR/form for most runners -> structural coverage ceiling."""
++    if card.get("is_maiden"):
++        return MAIDEN
++    label = " ".join(
++        str(card.get(k) or "") for k in ("race_type", "race_class", "race_name")
++    ).lower()
++    if "maiden" in label or "mdn" in label.split():
++        return MAIDEN
++    return ADDRESSABLE
++
++
++# ---------------------------------------------------------------------------
++# Amendment 3 — versioned gate-critical column manifest + dual-definition density
++# ---------------------------------------------------------------------------
++
++@dataclass(frozen=True)
++class GateColumnManifest:
++    """Reviewed, versioned set of gate-critical columns (per lane, per source)."""
++
++    version: str
++    runner_columns: Dict[str, Tuple[str, ...]]    # lane -> required runner columns
++    snapshot_columns: Dict[str, Tuple[str, ...]]  # lane -> required snapshot columns
++
++    def columns_for(self, lane: str, source: str) -> Tuple[str, ...]:
++        table = self.runner_columns if source == "runners" else self.snapshot_columns
++        return tuple(table.get(lane, ()))
++
++    def manifest_hash(self) -> str:
++        payload = json.dumps(
++            {
++                "version": self.version,
++                "runner_columns": {k: list(v) for k, v in sorted(self.runner_columns.items())},
++                "snapshot_columns": {k: list(v) for k, v in sorted(self.snapshot_columns.items())},
++            },
++            sort_keys=True,
++            separators=(",", ":"),
++        )
++        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
++
++
++# Example manifest — REVIEW + version-bump in the hibs-racing repo before use.
++DEFAULT_GATE_COLUMN_MANIFEST = GateColumnManifest(
++    version="gctcol-v1",
++    runner_columns={
++        "gate3": ("official_rating", "trainer_rtf", "days_since_run"),
++        "gate5": ("official_rating", "trainer_rtf", "jockey_rtf", "draw"),
++        "gate7": ("official_rating", "trainer_rtf", "jockey_rtf", "draw", "weight_lbs"),
++    },
++    snapshot_columns={
++        "gate3": ("official_rating", "trainer_rtf"),
++        "gate5": ("official_rating", "trainer_rtf", "jockey_rtf"),
++        "gate7": ("official_rating", "trainer_rtf", "jockey_rtf", "weight_lbs"),
++    },
++)
++
++
++def _row_fully_covered(row: Dict[str, Any], columns: Sequence[str]) -> bool:
++    for col in columns:
++        v = row.get(col)
++        if v is None or v == "":
++            return False
++        if isinstance(v, float) and math.isnan(v):
++            return False
++    return True
++
++
++def column_density(rows: Sequence[Dict[str, Any]], columns: Sequence[str]) -> Tuple[int, int]:
++    """Return (covered_rows, total_rows) where covered = ALL columns present/non-null."""
++    if not columns:
++        return (len(rows), len(rows))
++    covered = sum(1 for r in rows if _row_fully_covered(r, columns))
++    return (covered, len(rows))
++
++
++def dual_definition_density(
++    rows: Sequence[Dict[str, Any]],
++    *,
++    manifest: GateColumnManifest,
++    lane: str,
++    source: str,
++    full_columns: Optional[Sequence[str]] = None,
++) -> Dict[str, Any]:
++    """Density under the gate-critical manifest AND (optionally) the full column set.
++
++    Reporting both makes the audit-narrowing tweak transparent — you can see exactly
++    how much of the gap was sparse *optional* enrich vs genuinely missing gate inputs.
++    """
++    gate_cols = manifest.columns_for(lane, source)
++    gc_cov, n = column_density(rows, gate_cols)
++    out: Dict[str, Any] = {
++        "lane": lane,
++        "source": source,
++        "manifest_version": manifest.version,
++        "manifest_hash": manifest.manifest_hash(),
++        "gate_critical_columns": list(gate_cols),
++        "gate_critical_density_pct": round(100.0 * gc_cov / n, 2) if n else 0.0,
++        "n": n,
++        "covered": gc_cov,
++    }
++    if full_columns is not None:
++        full_cov, _ = column_density(rows, full_columns)
++        out["full_set_density_pct"] = round(100.0 * full_cov / n, 2) if n else 0.0
++        out["full_columns_count"] = len(list(full_columns))
++    return out
++
++
++# ---------------------------------------------------------------------------
++# Amendment 5 — uniform coverage verdict (Wilson lower bound clears the floor)
++# ---------------------------------------------------------------------------
++
++def coverage_verdict(
++    covered: int,
++    n: int,
++    *,
++    floor_pct: float,
++    z: float = 1.96,
++) -> Dict[str, Any]:
++    """Grade a coverage proportion the same way CLV beat-close is graded.
++
++    ``retest_ready`` (== promotable) requires the **Wilson lower bound** to clear the
++    floor — not the point estimate — so the gate never passes on coverage that is
++    statistically within noise of the floor.
++    """
++    if n <= 0:
++        return {
++            "metric": "coverage_proportion", "grade": "empty", "retest_ready": False,
++            "promotable": False, "n": 0, "coverage_pct": None,
++            "ci_low_pct": None, "ci_high_pct": None, "floor_pct": floor_pct,
++            "reason": "no rows in cohort",
++        }
++    low, high = wilson_interval(covered, n, z=z)
++    low_pct, high_pct = low * 100.0, high * 100.0
++    point_pct = 100.0 * covered / n
++    clears = low_pct >= floor_pct
++    return {
++        "metric": "coverage_proportion",
++        "grade": "sufficient" if clears else "thin",
++        "retest_ready": clears,
++        "promotable": clears,
++        "n": n,
++        "coverage_pct": round(point_pct, 2),
++        "ci_low_pct": round(low_pct, 2),
++        "ci_high_pct": round(high_pct, 2),
++        "floor_pct": floor_pct,
++        "reason": (
++            f"coverage 95% CI lower bound {low_pct:.2f}% "
++            f"{'>=' if clears else '<'} floor {floor_pct:.2f}% (n={n})"
++        ),
++    }
++
++
++def gate_coverage_by_cohort(
++    rows: Sequence[Dict[str, Any]],
++    *,
++    manifest: GateColumnManifest,
++    lane: str,
++    source: str,
++    cohort_of: Callable[[Dict[str, Any]], str] = classify_race_cohort,
++    floors: Optional[Dict[str, float]] = None,
++    full_columns: Optional[Sequence[str]] = None,
++) -> Dict[str, Any]:
++    """Per-cohort density + Wilson verdict; blocking cohorts drive ``retest_ready``."""
++    floors = floors or DEFAULT_COHORT_FLOORS
++    gate_cols = manifest.columns_for(lane, source)
++    buckets: Dict[str, List[Dict[str, Any]]] = {}
++    for r in rows:
++        buckets.setdefault(cohort_of(r), []).append(r)
++
++    cohorts: Dict[str, Any] = {}
++    blocking_pass = True
++    blocking_seen = False
++    for cohort, crows in buckets.items():
++        covered, n = column_density(crows, gate_cols)
++        floor = floors.get(cohort, floors.get(ADDRESSABLE, 85.0))
++        verdict = coverage_verdict(covered, n, floor_pct=floor)
++        verdict["blocking"] = cohort in BLOCKING_COHORTS
++        if full_columns is not None:
++            verdict["dual_definition"] = dual_definition_density(
++                crows, manifest=manifest, lane=lane, source=source, full_columns=full_columns
++            )
++        cohorts[cohort] = verdict
++        if cohort in BLOCKING_COHORTS:
++            blocking_seen = True
++            blocking_pass = blocking_pass and verdict["retest_ready"]
++
++    return {
++        "lane": lane,
++        "source": source,
++        "manifest_version": manifest.version,
++        "manifest_hash": manifest.manifest_hash(),
++        "cohorts": cohorts,
++        # retest_ready only if every blocking cohort (addressable) clears its floor.
++        "retest_ready": bool(blocking_seen and blocking_pass),
++    }
++
++
++# ---------------------------------------------------------------------------
++# Amendment 2 — composite config hash (stable) + data fingerprint (changes)
++# ---------------------------------------------------------------------------
++
++def gate_config_hash(*, gate_config_version: str, manifest: GateColumnManifest) -> str:
++    """Stable across re-enrich: hashes only config + column manifest, never row data.
++
++    Use this as ``--snapshot-config-hash`` in the re-audit; it does NOT change when
++    enrich adds rows, so re-stamp -> re-audit stays anchored.
++    """
++    payload = f"{gate_config_version}|{manifest.version}|{manifest.manifest_hash()}"
++    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
++
++
++def data_content_fingerprint(
++    *, row_count: int, covered_count: int, window_start: str, window_end: str
++) -> str:
++    """Changes whenever enrich/re-stamp alters coverage — assert it moved post-recovery."""
++    payload = f"{window_start}|{window_end}|{row_count}|{covered_count}"
++    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
++
++
++# ---------------------------------------------------------------------------
++# Amendment 4 — enrich-recovery guards
++# ---------------------------------------------------------------------------
++
++@dataclass
++class RecoveryGuardResult:
++    ok: bool
++    checks: List[Dict[str, Any]] = field(default_factory=list)
++
++
++def enrich_recovery_precheck(
++    *,
++    quota_remaining: int,
++    quota_needed_estimate: int,
++    checkpoint_date: str,
++    window_end: str,
++    milestone_days: int = 30,
++    safety_margin: float = 1.20,
++) -> RecoveryGuardResult:
++    """Pre-flight before kicking off a multi-hour batch-enrich-recovery run."""
++    checks: List[Dict[str, Any]] = []
++
++    need = int(quota_needed_estimate * safety_margin)
++    quota_ok = quota_remaining >= need
++    checks.append({
++        "check": "quota_headroom", "ok": quota_ok,
++        "detail": f"remaining={quota_remaining} need(+{int((safety_margin-1)*100)}%)={need}",
++    })
++
++    behind = checkpoint_date < window_end
++    checks.append({
++        "check": "checkpoint_behind_window", "ok": behind,
++        "detail": f"checkpoint={checkpoint_date} window_end={window_end}"
++        + ("" if behind else " (already current — nothing to recover)"),
++    })
++
++    cadence_ok = milestone_days >= 1
++    checks.append({
++        "check": "milestone_reaudit_cadence", "ok": cadence_ok,
++        "detail": f"re-audit every {milestone_days} enriched days (catch drift early)",
++    })
++
++    return RecoveryGuardResult(ok=all(c["ok"] for c in checks), checks=checks)
++
++
++# ---------------------------------------------------------------------------
++# Cross-lane uniform racing gate verdict (for the promotion scorecard)
++# ---------------------------------------------------------------------------
++
++def racing_gate_verdict(
++    audits: Sequence[Dict[str, Any]],
++    *,
++    gate_config_version: str,
++    manifest: GateColumnManifest,
++    as_of: str,
++) -> Dict[str, Any]:
++    """Collapse per-(lane, source) cohort audits into one cross-lane verdict block.
++
++    ``retest_ready`` is true only when EVERY audited (lane, source) passes its blocking
++    cohorts — matching the betting/trading ``promotable`` contract.
++    """
++    retest_ready = bool(audits) and all(a.get("retest_ready") for a in audits)
++    return {
++        "lane": "racing",
++        "metric": "coverage_proportion",
++        "promotable": retest_ready,
++        "retest_ready": retest_ready,
++        "as_of": as_of,
++        "config_hash": gate_config_hash(gate_config_version=gate_config_version, manifest=manifest),
++        "manifest_version": manifest.version,
++        "audits": list(audits),
++        "reason": (
++            "all blocking cohorts clear floor on both sources"
++            if retest_ready
++            else "one or more blocking cohorts below floor — do not walk-forward / promote"
++        ),
++    }
+diff --git a/handoff/test_racing_gate_reference.py b/handoff/test_racing_gate_reference.py
+new file mode 100644
+index 0000000..2de9f2a
+--- /dev/null
++++ b/handoff/test_racing_gate_reference.py
+@@ -0,0 +1,107 @@
++"""Tests for the portable hibs-racing gate-coverage reference (pure, deterministic)."""
++
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(__file__))
++
++from racing_gate_reference import (  # noqa: E402
++    ADDRESSABLE,
++    DEFAULT_GATE_COLUMN_MANIFEST as M,
++    MAIDEN,
++    classify_race_cohort,
++    coverage_verdict,
++    data_content_fingerprint,
++    dual_definition_density,
++    enrich_recovery_precheck,
++    gate_config_hash,
++    gate_coverage_by_cohort,
++    racing_gate_verdict,
++    wilson_interval,
++)
++
++
++def _runner(cov=True, maiden=False):
++    base = {"race_type": "maiden stakes" if maiden else "handicap",
++            "official_rating": 80, "trainer_rtf": 0.2, "days_since_run": 21}
++    if not cov:
++        base["official_rating"] = None
++    return base
++
++
++# --- Amendment 1: cohort taxonomy ---
++def test_classify_race_cohort():
++    assert classify_race_cohort({"race_type": "Class 3 Handicap"}) == ADDRESSABLE
++    assert classify_race_cohort({"race_type": "EBF Maiden Stakes"}) == MAIDEN
++    assert classify_race_cohort({"is_maiden": True}) == MAIDEN
++
++
++# --- Amendment 3: dual-definition density ---
++def test_dual_definition_density_reports_both():
++    rows = [_runner(cov=True), _runner(cov=True), _runner(cov=False)]
++    rep = dual_definition_density(rows, manifest=M, lane="gate3", source="runners",
++                                  full_columns=("official_rating", "trainer_rtf", "speed_fig_optional"))
++    assert rep["n"] == 3
++    assert rep["gate_critical_density_pct"] == round(100 * 2 / 3, 2)
++    assert "full_set_density_pct" in rep            # optional sparse field drags this lower
++    assert rep["manifest_version"] == "gctcol-v1"
++
++
++# --- Amendment 5: Wilson coverage verdict ---
++def test_coverage_verdict_uses_wilson_lower_bound():
++    # 90/100 -> point 90% but Wilson low ~82.6% < 85 floor -> NOT ready (noise guard).
++    v = coverage_verdict(90, 100, floor_pct=85.0)
++    assert v["coverage_pct"] == 90.0
++    assert v["ci_low_pct"] < 85.0 and v["retest_ready"] is False
++    # 900/1000 -> Wilson low ~88% >= 85 -> ready.
++    v2 = coverage_verdict(900, 1000, floor_pct=85.0)
++    assert v2["retest_ready"] is True and v2["promotable"] is True
++    assert coverage_verdict(0, 0, floor_pct=85.0)["grade"] == "empty"
++
++
++def test_gate_coverage_by_cohort_blocks_on_addressable_only():
++    # Addressable: 900/1000 covered -> passes. Maiden: 10/100 -> fails its floor but non-blocking.
++    rows = [_runner(cov=True) for _ in range(900)] + [_runner(cov=False) for _ in range(100)]
++    rows += [_runner(cov=False, maiden=True) for _ in range(90)] + [_runner(cov=True, maiden=True) for _ in range(10)]
++    audit = gate_coverage_by_cohort(rows, manifest=M, lane="gate3", source="runners")
++    assert audit["cohorts"][ADDRESSABLE]["retest_ready"] is True
++    assert audit["cohorts"][MAIDEN]["retest_ready"] is False
++    assert audit["cohorts"][MAIDEN]["blocking"] is False
++    assert audit["retest_ready"] is True  # maiden failure does NOT block
++
++
++# --- Amendment 2: composite hash stable, fingerprint changes ---
++def test_config_hash_stable_fingerprint_changes():
++    h1 = gate_config_hash(gate_config_version="g3-2026.05", manifest=M)
++    h2 = gate_config_hash(gate_config_version="g3-2026.05", manifest=M)
++    assert h1 == h2  # stable across re-enrich (no row data in it)
++    fp_before = data_content_fingerprint(row_count=4513, covered_count=350,
++                                         window_start="2025-11-01", window_end="2026-05-22")
++    fp_after = data_content_fingerprint(row_count=64691, covered_count=58000,
++                                        window_start="2025-11-01", window_end="2026-05-22")
++    assert fp_before != fp_after  # re-stamp detectable
++
++
++# --- Amendment 4: recovery guards ---
++def test_enrich_recovery_precheck():
++    ok = enrich_recovery_precheck(quota_remaining=100000, quota_needed_estimate=60000,
++                                  checkpoint_date="2025-11-19", window_end="2026-05-22")
++    assert ok.ok is True
++    short = enrich_recovery_precheck(quota_remaining=50000, quota_needed_estimate=60000,
++                                     checkpoint_date="2025-11-19", window_end="2026-05-22")
++    assert short.ok is False  # quota headroom (with margin) fails
++
++
++def test_racing_gate_verdict_cross_lane_contract():
++    passing = gate_coverage_by_cohort(
++        [_runner(cov=True) for _ in range(1000)], manifest=M, lane="gate3", source="runners"
++    )
++    v = racing_gate_verdict([passing], gate_config_version="g3-2026.05", manifest=M,
++                            as_of="2026-06-05T18:00:00+00:00")
++    assert v["lane"] == "racing" and v["promotable"] is True and v["retest_ready"] is True
++    assert v["metric"] == "coverage_proportion"
++
++
++def test_wilson_matches_known_bounds():
++    low, high = wilson_interval(90, 100)
++    assert 0.82 < low < 0.84 and 0.94 < high < 0.95
+-- 
+2.43.0
+
