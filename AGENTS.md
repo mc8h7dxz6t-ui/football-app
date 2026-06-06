@@ -1,0 +1,53 @@
+# AGENTS.md
+
+## Cursor Cloud specific instructions
+
+### Project overview
+
+Single-process **Python / Streamlit** app (`app.py`) — no Docker, no database, no monorepo. Core modules: `model.py`, `backtest.py`, `xg_sources.py`, `run_backtest.py`.
+
+### PATH
+
+`pip install --user` puts CLI tools in `~/.local/bin`. Add to PATH before running commands:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Use `python3` (not `python`) for scripts like `run_backtest.py`.
+
+### Install dependencies
+
+See `README.md`. Typical dev setup:
+
+```bash
+pip install -r requirements-dev.txt   # app + pytest
+pip install -r requirements-xg.txt    # optional Understat xG (heavy)
+```
+
+### Run / test
+
+| Task | Command |
+|------|---------|
+| Unit tests | `pytest -q` |
+| Streamlit UI | `streamlit run app.py` → http://localhost:8501 |
+| Headless engine demo (no API) | `python3 run_backtest.py --simulate 6000` |
+| Live scan/backtest | Requires `API_SPORTS_KEY` (or `API_FOOTBALL_KEY`) env var or `.streamlit/secrets.toml` |
+
+### API key
+
+Live fixture/odds data needs a free [API-Football](https://www.api-football.com) key. Without it, Streamlit shows an error and stops before the Value Scan / Backtest tabs. Copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` to configure locally.
+
+### Linting
+
+No linter is configured in this repo. Validation is via `pytest -q`.
+
+### Long-running services
+
+Start Streamlit in tmux for background use:
+
+```bash
+streamlit run app.py --server.headless true --server.port 8501
+```
+
+Default port: **8501**.
