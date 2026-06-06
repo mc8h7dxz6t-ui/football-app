@@ -1,0 +1,5 @@
+# Optional: backup xG via Understat/FBref scraping (see xg_sources.py).
+# Heavy; only needed if you enable xG blending. Imported lazily, so the core
+# app runs without it (degrades to goals-only).
+-r requirements.txt
+soccerdata>=1.8
