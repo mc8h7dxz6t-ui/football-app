@@ -1,7 +1,7 @@
 From 2171d06d6693c46ebe19a57e9662297b5504febd Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:10:42 +0000
-Subject: [PATCH 01/30] TRD-089: wire tick-to-trade telemetry into live
+Subject: [PATCH 01/31] TRD-089: wire tick-to-trade telemetry into live
  execution hot path
 
 Record record_tick_to_trade() on the real StrategyRunner routed path
@@ -190,7 +190,7 @@ index 18552d1..e7496c3 100644
 From 5134389bf54b392a1885047dad3d32dbcdf9f981 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:11:20 +0000
-Subject: [PATCH 02/30] docs: add prop-desk strategy & trajectory (Line-Shop ->
+Subject: [PATCH 02/31] docs: add prop-desk strategy & trajectory (Line-Shop ->
  Arb -> Market-Making)
 
 Capture the unifying thesis behind football, racing, and trading_core as
@@ -330,7 +330,7 @@ index 0000000..3319a76
 From 70fe694f5a04945ed2c42cecb5fcaee7d25b4ce2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 15:54:44 +0000
-Subject: [PATCH 03/30] docs: queue trading-repo extraction plan for next agent
+Subject: [PATCH 03/31] docs: queue trading-repo extraction plan for next agent
 
 Executable scope to split trading_core out of hibs-bet into a standalone
 hibs-trading repo (peer to football/racing). Includes exact file
@@ -476,7 +476,7 @@ index 0000000..647b072
 From 2c2be859e9e2a343c49a6074f5f45d76a6b049b0 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:17:18 +0000
-Subject: [PATCH 04/30] docs: add rebase note to extraction plan (origin/main
+Subject: [PATCH 04/31] docs: add rebase note to extraction plan (origin/main
  +5, strategy_runner overlap)
 
 origin/main advanced to fa22a8e after this branch was cut; commit 18dd2f6
@@ -514,7 +514,7 @@ index 647b072..1d3a402 100644
 From 490840d10b5095e2150a067c391e59d4b1d95677 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:29:51 +0000
-Subject: [PATCH 05/30] inst++: add statistical-significance evidence engine
+Subject: [PATCH 05/31] inst++: add statistical-significance evidence engine
  for value gating
 
 Add evidence_stats.py: deterministic (seeded) bootstrap ROI confidence
@@ -1131,7 +1131,7 @@ index e0a146b..b423508 100644
 From a8d7b38322b01d019e51f4af97fd3b888f5e7395 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:29:51 +0000
-Subject: [PATCH 06/30] fix(players): merge duplicate extra_js Jinja block
+Subject: [PATCH 06/31] fix(players): merge duplicate extra_js Jinja block
  (restores players page)
 
 templates/players.html declared {% block extra_js %} twice, which raises
@@ -1168,7 +1168,7 @@ index 54cdaf6..2b0411a 100644
 From 82d68f34a6eeeaee94ee70813437312b0f7087d2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:30:33 +0000
-Subject: [PATCH 07/30] docs: institutional++ roadmap + work queue
+Subject: [PATCH 07/31] docs: institutional++ roadmap + work queue
 
 Capture Tier-0 done (evidence-significance engine, TRD-089, players fix)
 and the prioritized next-agent queue: significance as the promotion gate
@@ -1290,7 +1290,7 @@ index d838ade..7f4958f 100644
 From baa9a77ca0ea9f950722cd2fefef20aa5fc580f2 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:31:22 +0000
-Subject: [PATCH 08/30] docs: update extraction-plan rebase note (branch
+Subject: [PATCH 08/31] docs: update extraction-plan rebase note (branch
  already rebased, overlap resolved)
 
 ---
@@ -1326,7 +1326,7 @@ index 1d3a402..f386d9f 100644
 From 32862fcaa32995c67850349876821f3ece1d1356 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:22 +0000
-Subject: [PATCH 09/30] fix(tests): align prediction_log_auto with
+Subject: [PATCH 09/31] fix(tests): align prediction_log_auto with
  HIBS_AUDIT_REQUIRE_ODDS=1 default
 
 The audit-require-odds default flipped to 1 (forward odds-capture work),
@@ -1386,7 +1386,7 @@ index 555094f..6223e68 100644
 From ce8e784f20034307dec12a8ec4f845ec3c43f265 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:22 +0000
-Subject: [PATCH 10/30] fix(gate-compare): restore os.environ after profile
+Subject: [PATCH 10/31] fix(gate-compare): restore os.environ after profile
  eval (deterministic CI)
 
 _apply_profile_env mutated global os.environ without restoring, leaking
@@ -1556,7 +1556,7 @@ index b423508..fc1cfb2 100644
 From f9439abf9ec7334a4228424c4d370f86b5e05a3d Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:35:43 +0000
-Subject: [PATCH 11/30] docs: mark all pre-existing CI failures cleared (suite
+Subject: [PATCH 11/31] docs: mark all pre-existing CI failures cleared (suite
  green 600/0)
 
 ---
@@ -1611,7 +1611,7 @@ index f386d9f..7b92367 100644
 From 3811827f353094aad44ff45a2150d136b5526730 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:38:30 +0000
-Subject: [PATCH 12/30] inst++: add classify_binomial_evidence (Wilson-CI
+Subject: [PATCH 12/31] inst++: add classify_binomial_evidence (Wilson-CI
  proportion grading)
 
 Sister classifier to classify_evidence for binary edges (CLV beat-close,
@@ -1882,7 +1882,7 @@ index 1bd067f..1ad938a 100644
 From c84fc3081f0627894121ec3b5211ac551077d404 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 16:38:40 +0000
-Subject: [PATCH 13/30] docs: note binomial Wilson-CI classifier in roadmap
+Subject: [PATCH 13/31] docs: note binomial Wilson-CI classifier in roadmap
  (uniform EvidenceVerdict)
 
 ---
@@ -1909,7 +1909,7 @@ index 3feb5f9..d5c5b7c 100644
 From a4d157c59bfce8f9c457f8c5c3048df2031129cc Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:15:21 +0000
-Subject: [PATCH 14/30] inst++: blended CLV gate (frequency x magnitude) +
+Subject: [PATCH 14/31] inst++: blended CLV gate (frequency x magnitude) +
  precision experiment
 
 Add classify_clv_edge: a beat-close edge must clear BOTH the Wilson
@@ -2142,7 +2142,7 @@ index 1ad938a..b9ea04d 100644
 From 6bf334a23ebb6a4b13c7325f5e2a2e73a0e2d69e Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:15:32 +0000
-Subject: [PATCH 15/30] docs: record blended CLV gate + precision experiment in
+Subject: [PATCH 15/31] docs: record blended CLV gate + precision experiment in
  roadmap
 
 ---
@@ -2168,7 +2168,7 @@ index d5c5b7c..4034ff0 100644
 From 8a2b168e7ebfbdad89f2154c67fbfd60a30ab93e Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:38:00 +0000
-Subject: [PATCH 16/30] inst++: add magnitude floor to continuous value-leg
+Subject: [PATCH 16/31] inst++: add magnitude floor to continuous value-leg
  gate (two-part sieve)
 
 Fold min_edge_magnitude_pct into classify_evidence (default 0.0 = inert,
@@ -2384,7 +2384,7 @@ index b9ea04d..e3350dd 100644
 From f29195cd9d300d22b2968f262e385a7003f7f416 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:38:12 +0000
-Subject: [PATCH 17/30] docs: record value-leg magnitude floor (two-part sieve)
+Subject: [PATCH 17/31] docs: record value-leg magnitude floor (two-part sieve)
  in roadmap
 
 ---
@@ -2410,7 +2410,7 @@ index 4034ff0..c958281 100644
 From 5284b289ef4fcff441e7eaa162effc303f115a26 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:45:48 +0000
-Subject: [PATCH 18/30] inst++: deterministic promotion-threshold sweep harness
+Subject: [PATCH 18/31] inst++: deterministic promotion-threshold sweep harness
 
 Pre-baked optimizer (pure, stdlib + evidence_stats only) so the desk can
 tune gates the moment Q2 forward-capture populates rows. Grids over
@@ -2722,7 +2722,7 @@ index 0000000..9d0188a
 From 21300fc065d10b846bba1fc6eb5ab4a61c587442 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:46:13 +0000
-Subject: [PATCH 19/30] docs: record sweep harness + dashboard verdict schema
+Subject: [PATCH 19/31] docs: record sweep harness + dashboard verdict schema
  (Q1) in roadmap
 
 ---
@@ -2763,7 +2763,7 @@ index c958281..ecc031e 100644
 From 52afa0c7cfa4e3bdc637111e9790274dd8a17b14 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:51:45 +0000
-Subject: [PATCH 20/30] inst++: wire evidence verdicts into /api/health
+Subject: [PATCH 20/31] inst++: wire evidence verdicts into /api/health
  (decoupled, null-safe)
 
 Add evidence_health_blocks(): value-leg 'evidence' read from the last
@@ -3027,7 +3027,7 @@ index fc1cfb2..28df303 100644
 From fbe9bc4a21d8f4ff0558fec50aa6ff59460d14d9 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:52:06 +0000
-Subject: [PATCH 21/30] docs: record /api/health evidence wiring done; frontend
+Subject: [PATCH 21/31] docs: record /api/health evidence wiring done; frontend
  render remains (Q1)
 
 ---
@@ -3063,7 +3063,7 @@ index ecc031e..66ccaf3 100644
 From 57627923c12a9361bb35bb202ec5030be2b2cd8b Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 17:56:05 +0000
-Subject: [PATCH 22/30] docs/env: stage promotion-floor vars + EvidenceVerdict
+Subject: [PATCH 22/31] docs/env: stage promotion-floor vars + EvidenceVerdict
  payload contract for hand-off
 
 Document HIBS_VALUE_MIN_EDGE_PCT and HIBS_CLV_MIN_PP in .env.example
@@ -3141,7 +3141,7 @@ index 66ccaf3..346fb76 100644
 From ffab220f128d29e502dc7f6557c1d3a2d7be36e6 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 18:20:15 +0000
-Subject: [PATCH 23/30] =?UTF-8?q?inst++:=20racing=20gate-coverage=20amendm?=
+Subject: [PATCH 23/31] =?UTF-8?q?inst++:=20racing=20gate-coverage=20amendm?=
  =?UTF-8?q?ents=20=E2=80=94=20drop-in=20tested=20hand-off?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3759,7 +3759,7 @@ index 0000000..2de9f2a
 From 9ff5b7259628e2e824a2078cdf1e2761b574d91f Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 22:59:06 +0000
-Subject: [PATCH 24/30] docs(racing): institutional++ runbook to take build 7
+Subject: [PATCH 24/31] docs(racing): institutional++ runbook to take build 7
  -> 9 (ordered, accept checks)
 
 ---
@@ -3921,7 +3921,7 @@ index 0000000..f0e8946
 From 23126920118d77541d5385d9175a958ea03f1c33 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:03:48 +0000
-Subject: [PATCH 25/30] docs: institutional++ build runbooks for football (->9)
+Subject: [PATCH 25/31] docs: institutional++ build runbooks for football (->9)
  and trading (8->9)
 
 ---
@@ -4131,7 +4131,7 @@ index 0000000..2d18c8c
 From 9c1e0e11984d66145c19c20b25f2ec68e0d0fbcc Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:07:17 +0000
-Subject: [PATCH 26/30] docs: master access + go-live checklist (value-soonest
+Subject: [PATCH 26/31] docs: master access + go-live checklist (value-soonest
  sequencing across all lanes)
 
 ---
@@ -4228,7 +4228,7 @@ index 0000000..edabeba
 From a90cc780f86725197a8c2f06083592da4e513920 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:26:36 +0000
-Subject: [PATCH 27/30] =?UTF-8?q?docs(racing):=20amend=20runbook=20to=20in?=
+Subject: [PATCH 27/31] =?UTF-8?q?docs(racing):=20amend=20runbook=20to=20in?=
  =?UTF-8?q?st++=20=E2=80=94=20Wilson-lowerbound=20gates,=20illustrative-co?=
  =?UTF-8?q?mmand=20caveat,=20machine-checkable=20sign-off=20signature,=20n?=
  =?UTF-8?q?o=20overclaim?=
@@ -4313,7 +4313,7 @@ index f0e8946..c8d8832 100644
 From a4fb352c64bc2cb77c89453bb6b386e64aa32622 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:30:54 +0000
-Subject: [PATCH 28/30] docs: guard against hand-setting promotion floors to
+Subject: [PATCH 28/31] docs: guard against hand-setting promotion floors to
  1.0 (launch=0.0, sweep-tuned only)
 
 ---
@@ -4340,7 +4340,7 @@ index 4a0af3e..bb79a72 100644
 From 7df8acc05bd2fecff2c9ecb574fbd88840414f6f Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Fri, 5 Jun 2026 23:34:13 +0000
-Subject: [PATCH 29/30] test/docs: hermetic staging sandbox via DI (no prod
+Subject: [PATCH 29/31] test/docs: hermetic staging sandbox via DI (no prod
  flag, fail-closed, leak-proof)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -4454,7 +4454,7 @@ index 0000000..d4dfc9c
 From 09a882e1630ee71ba4da99121bc5cdd625255b96 Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Sat, 6 Jun 2026 23:44:08 +0000
-Subject: [PATCH 30/30] docs(football): add data-pipeline hardening (SQLite
+Subject: [PATCH 30/31] docs(football): add data-pipeline hardening (SQLite
  write-lock during backfill, verify blind_backtest path)
 
 ---
@@ -4481,6 +4481,121 @@ index bfd3f2d..5d31775 100644
 +
  ## Related
  [INST_PLUS_PLUS_ROADMAP.md](./INST_PLUS_PLUS_ROADMAP.md) · [INSTITUTIONAL_SCORECARD.md](./INSTITUTIONAL_SCORECARD.md) · [FOOTBALL_SALE_READINESS.md](./FOOTBALL_SALE_READINESS.md)
+-- 
+2.43.0
+
+
+From cbaa96795d07e23a10ae5a06fd03f854f30ba14b Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Sun, 7 Jun 2026 00:09:14 +0000
+Subject: [PATCH 31/31] docs(football): institutional++ PIT improvements spec
+ (fix lookahead-inflated Brier)
+
+Live pre-kickoff snapshot enforcement (feature_asof <= captured_at),
+rolling as-of-date Understat xG (replace season-total leak), leakage
+canary in CI (blind-vs-stored Brier delta gate), temporal DQ flag.
+Driven by blind backtest: stored 0.542 vs blind 0.678 Brier.
+---
+ docs/FOOTBALL_PIT_IMPROVEMENTS.md | 77 +++++++++++++++++++++++++++++++
+ docs/INST_PLUS_PLUS_ROADMAP.md    |  1 +
+ 2 files changed, 78 insertions(+)
+ create mode 100644 docs/FOOTBALL_PIT_IMPROVEMENTS.md
+
+diff --git a/docs/FOOTBALL_PIT_IMPROVEMENTS.md b/docs/FOOTBALL_PIT_IMPROVEMENTS.md
+new file mode 100644
+index 0000000..dd09cd1
+--- /dev/null
++++ b/docs/FOOTBALL_PIT_IMPROVEMENTS.md
+@@ -0,0 +1,77 @@
++# Football — Institutional++ Point-in-Time (PIT) Improvements
++
++**Why this exists.** The blind backtest exposed that the headline metrics were
++**lookahead-inflated**: on the same 58-fixture sample, **stored (lookahead) Brier 0.542 /
++58.6% top-pick** vs **blind (PIT) Brier 0.678 / 43.1%** — a **+0.136 Brier, +15.5pp**
++optimism gap. The model is only as good as its *point-in-time* inputs, and historic
++enrich used "as-of-today" form/table/xG. These changes make every feature **as-of the
++capture time**, so backtest = live and the metrics are trustworthy.
++
++**Acceptance for the whole effort:** blind (PIT) Brier converges toward stored Brier
++(`mean_brier_delta_blind_minus_stored` → ~0), proving the leakage is gone — *then* any
++Brier claim is real.
++
++---
++
++## Improvement 1 — Enforce live pre-kickoff snapshots (temporal integrity)
++The daily cron already captures pre-kickoff snapshots; the institutional++ upgrade is to
++make leakage **structurally impossible**, not just conventional.
++
++- **Freeze the feature vector at capture.** `prediction_snapshots` must store the exact
++  features used (form, table, xG, odds) **as computed at `captured_at`** — never
++  re-derived later from current API responses.
++- **Assert `captured_at ≤ kickoff − buffer`** (e.g. 15 min) on write; reject otherwise.
++- **Stamp every feature's source date.** Add `feature_asof` metadata; a snapshot is valid
++  only if every feature's source data is dated `≤ captured_at`.
++- **Never backfill features post-hoc** into a settled snapshot (results-only joins are OK).
++- Guard: `assert_pit_snapshot(snapshot)` → raises if any `feature_asof > captured_at`.
++
++## Improvement 2 — PIT rolling Understat xG (the key data fix)
++**Current bug:** `xg_sources` aggregates **season-total** xG (all of a team's matches).
++For *today's* fixtures that's fine (all played matches are in the past), but for any
++*historic/backtest* date it **includes matches after the fixture → lookahead.** That is a
++direct contributor to the inflated stored Brier.
++
++- Replace season-total with **as-of-date rolling xG**: for a fixture on date `D`, use only
++  that team's matches with `match_date < D`.
++  ```python
++  def team_xg_as_of(team, fixture_date, *, last_n=8):
++      # soccerdata Understat read_team_match_stats has per-match date + home/away xg
++      matches = [m for m in team_matches(team) if m["date"] < fixture_date][-last_n:]
++      return aggregate_xg(matches)   # for/against, home/away splits, per-game
++  ```
++- Use a **rolling window** (last N matches) rather than season-to-date, for recency.
++- Cache per (team, season); the function is pure given the match list → deterministic +
++  testable, and **identical in backtest and live** (live `D = today` ⇒ same code path).
++- Strict mode in the blind backtest must call `team_xg_as_of`, not season totals.
++
++## Improvement 3 — Leakage canary in CI (don't let it regress)
++- Add a CI check that runs the blind backtest on a fixed sample and **fails if
++  `mean_brier_delta_blind_minus_stored` exceeds a threshold** (e.g. > 0.05). This catches
++  any new feature that reintroduces lookahead.
++- Treat a widening blind-vs-stored gap as a **data-integrity incident**, like a recon drift.
++
++## Improvement 4 — Temporal DQ flag (completeness ≠ validity)
++- Extend `data_quality` with `temporal_pit_ok: bool` (all feature source dates ≤ captured_at).
++- A fixture is "high-trust" only if **both** the completeness score ≥ floor **and**
++  `temporal_pit_ok` is true. The current 0–100% score measures completeness, not validity —
++  this closes that gap.
++
++---
++
++## Validation sequence
++1. Land Improvements 1–2; re-run `run_blind_80d_backtest.py --strict --days 180`.
++2. Confirm **blind Brier ≈ stored Brier** (delta → ~0) and that the honest Brier is the
++   one quoted everywhere (sale deck, scorecard).
++3. Wire Improvement 3 (canary) into CI; add Improvement 4 to the DQ chip.
++4. Only after the PIT Brier is trustworthy do model-feature upgrades (injuries, lineups,
++   rest) get measured fairly.
++
++## Note on what this does NOT fix
++PIT correctness makes the Brier *honest* — it does not by itself make the model *better*.
++If the honest Brier stays ~baseline after this, the model needs genuine feature work; and
++remember the **line-shopper can still be +EV via CLV even with a mediocre Brier** — so CLV
++remains the parallel, equally-important proof.
++
++## Related
++[INST_PLUS_PLUS_ROADMAP.md](./INST_PLUS_PLUS_ROADMAP.md) · [FOOTBALL_RUNBOOK_TO_9.md](./FOOTBALL_RUNBOOK_TO_9.md) · [FOOTBALL_SALE_READINESS.md](./FOOTBALL_SALE_READINESS.md)
+diff --git a/docs/INST_PLUS_PLUS_ROADMAP.md b/docs/INST_PLUS_PLUS_ROADMAP.md
+index bb79a72..3370678 100644
+--- a/docs/INST_PLUS_PLUS_ROADMAP.md
++++ b/docs/INST_PLUS_PLUS_ROADMAP.md
+@@ -111,6 +111,7 @@ Both are read at request time (`os.getenv`), so changing them is a config-only r
+ 
+ ## Per-lane build runbooks (7/8 → 9)
+ - Football: [FOOTBALL_RUNBOOK_TO_9.md](./FOOTBALL_RUNBOOK_TO_9.md) — land evidence engine + dashboard render + CI gate.
++- Football PIT: [FOOTBALL_PIT_IMPROVEMENTS.md](./FOOTBALL_PIT_IMPROVEMENTS.md) — fix lookahead (blind Brier 0.678 vs stored 0.542): live snapshot enforcement, rolling as-of-date Understat xG, leakage canary, temporal DQ flag.
+ - Trading: [TRADING_RUNBOOK_8_TO_9.md](./TRADING_RUNBOOK_8_TO_9.md) — TRD-089 live + repo split + drills/alerts + CI gate.
+ - Racing: [RACING_RUNBOOK_7_TO_9.md](./RACING_RUNBOOK_7_TO_9.md) — finish enrich + cohort gate + VPS + Matchbook + CI gate.
+ 
 -- 
 2.43.0
 
