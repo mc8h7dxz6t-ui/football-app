@@ -477,35 +477,62 @@ with racing_tab:
 
 # ---------------------- Inst++ Status ----------------------
 with inst_tab:
-    st.caption("Decoupled ingest pipeline: feeds → Redis → workers → API → UI")
+    st.subheader("Football Value Engine — Inst++ layer")
+    st.caption(
+        "Product name: **Football Value Engine (FVE)**. "
+        "Inst++ is the decoupled ingest/API tier (not a separate app)."
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Streamlit UI** (this app)")
+        st.code("streamlit run app.py  →  :8501", language="bash")
+    with col_b:
+        st.markdown("**FastAPI + OpenAPI**")
+        st.code(f"{fve_api.base_url}/docs", language="text")
+    st.markdown(
+        f"**WebSocket lines:** `ws://…/ws/lines/{{fixture_key}}` · "
+        f"**Health:** `{fve_api.base_url}/health`"
+    )
     if api_live:
         try:
             h = fve_api.health()
-            st.json(h)
+            st.success("API online")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Cache", h.get("cache_backend", "—"))
+            c2.metric("Line bus", h.get("line_bus", "—"))
+            budgets = (h.get("api_budgets") or {}).get("sources") or {}
+            odds_rem = (budgets.get("odds_api") or {}).get("remaining")
+            c3.metric("Odds API left/hr", odds_rem if odds_rem is not None else "—")
+            with st.expander("Full /health JSON"):
+                st.json(h)
         except Exception as exc:
             st.error(f"API health check failed: {exc}")
     else:
-        st.info(
-            "Start institutional stack:\n\n"
-            "```bash\n"
-            "docker compose up -d redis postgres\n"
+        st.warning("API offline — start the stack below, then refresh.")
+        st.code(
+            "docker compose up -d redis\n"
             "pip install -r requirements-pro.txt\n"
             "uvicorn api.main:app --port 8000\n"
-            "python worker.py --fixtures 'TeamA v TeamB:fixture_id:matchbook_event_id'\n"
-            "```"
+            "python worker.py --fixtures 'Arsenal v Chelsea:12345:67890'",
+            language="bash",
         )
     st.markdown(
         """
-**Architecture**
+**How to use Inst++ in the UI**
+1. Sidebar → enable **Use FastAPI ingest layer (Redis cache)**
+2. **Value Scan** → picks come from `/value-scan` (cached lines, sharp filter)
+3. Run **worker.py** in another terminal so Matchbook/API-Football lines populate Redis
+
+**Stack (Phase 0 Inst++)**
 ```
-Matchbook / API-Football / (Betfair stub)
-        → ingest worker (5s poll)
-        → Redis dedupe cache
-        → Shin de-vig sharp synthetic line
-        → FastAPI /value-scan
-        → Streamlit (no direct book calls)
+Feeds (Matchbook ~1s, API-Football ~5s, Odds API OFF by default)
+  → worker (250ms async scheduler) → Redis ZSET + line_bus pub/sub
+  → Shin de-vig · circuit breakers · hourly API budgets
+  → FastAPI REST + WebSocket → this Streamlit UI
 ```
-**Matchbook:** set `MATCHBOOK_USERNAME` + `MATCHBOOK_PASSWORD` and map `matchbook_event_id` in worker fixtures.
+
+See `docs/ARCHITECTURE.md` for the full Institutional++ roadmap vs what ships today.
+**Hibs Bet** is a separate product — it can consume FVE via `FVE_API_URL`, not this Streamlit skin.
         """
     )
 
