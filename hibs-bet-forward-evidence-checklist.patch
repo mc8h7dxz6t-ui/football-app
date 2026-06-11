@@ -1,0 +1,575 @@
+From 8cbd3f4b6533db32f8df19cd14e896e5882a10c3 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursor-agent@users.noreply.github.com>
+Date: Thu, 11 Jun 2026 21:59:09 +0000
+Subject: [PATCH] Add C1-C4 football evidence checklist orchestrator
+
+- football_evidence_checklist() tracks C1 cron, C2 snapshots, C3 backfill, C4 verify
+- scripts/run_football_evidence_checklist.sh runs automated steps with --status/--watch/--remote
+- verify_football_evidence_gates.sh prints checklist progress
+- Docs and buyer bootstrap updated to reference labelled C1-C4 path
+---
+ docs/B2B_OPERATOR_RUNBOOK.md               |  24 ++-
+ docs/NINE_TEN_SCORECARD.md                 |  10 +-
+ scripts/buyer_bootstrap_vps.sh             |   9 +-
+ scripts/green_forward_evidence.sh          |   3 +
+ scripts/run_football_evidence_checklist.sh | 228 +++++++++++++++++++++
+ scripts/verify_football_evidence_gates.sh  |   6 +
+ src/hibs_predictor/forward_evidence.py     | 128 +++++++++++-
+ tests/test_forward_evidence.py             |  28 ++-
+ 8 files changed, 420 insertions(+), 16 deletions(-)
+ create mode 100755 scripts/run_football_evidence_checklist.sh
+
+diff --git a/docs/B2B_OPERATOR_RUNBOOK.md b/docs/B2B_OPERATOR_RUNBOOK.md
+index 208dc87..750cd3c 100644
+--- a/docs/B2B_OPERATOR_RUNBOOK.md
++++ b/docs/B2B_OPERATOR_RUNBOOK.md
+@@ -24,11 +24,31 @@ Edit `/opt/hibs-bet/.env`: `API_SPORTS_FOOTBALL_KEY`, `HIBS_AUTH_PASSWORD`, `HIB
+ 
+ ## Forward evidence (buyer data room)
+ 
++Operator checklist **C1–C4**:
++
++| Step | Action |
++|------|--------|
++| **C1** | `sudo bash deploy/cron-hibs-calibration.sh --install` on VPS |
++| **C2** | Load dashboard while logged in on fixture days (seeds snapshots) |
++| **C3** | `bash scripts/run_forward_backfill_plan.sh` |
++| **C4** | Wait for ≥3 matchdays + `pred-log-sync` → `./scripts/verify_football_evidence_gates.sh` |
++
++One command (status + automated steps + verify):
++
+ ```bash
+ cd /opt/hibs-bet
+ export PYTHONPATH=src
+-./scripts/green_forward_evidence.sh              # until buyer_ready=true
+-./scripts/green_forward_evidence.sh --watch      # hourly poll after matchdays
++./scripts/run_football_evidence_checklist.sh              # C1+C3+C4 auto; C2 manual
++./scripts/run_football_evidence_checklist.sh --status     # checklist only
++./scripts/run_football_evidence_checklist.sh --seed       # API alternative for C2
++./scripts/run_football_evidence_checklist.sh --watch      # C4 hourly poll
++./scripts/run_football_evidence_checklist.sh --remote      # SSH to VPS
++```
++
++Legacy wrapper (same goal):
++
++```bash
++./scripts/green_forward_evidence.sh --watch
+ ./scripts/export_b2b_data_room.sh              # one folder: sqlite + backtest + chip snapshot
+ ```
+ 
+diff --git a/docs/NINE_TEN_SCORECARD.md b/docs/NINE_TEN_SCORECARD.md
+index 32df35c..89a250e 100644
+--- a/docs/NINE_TEN_SCORECARD.md
++++ b/docs/NINE_TEN_SCORECARD.md
+@@ -31,10 +31,12 @@ Run: `./scripts/score_hibs_nine_ten.sh` (local + optional VPS SSH).
+ 
+ ### Football evidence (time + ops)
+ 
+-1. Deploy with `HIBS_EVIDENCE_DEPLOY_DATE` set  
+-2. `run_forward_backfill_plan.sh`  
+-3. Dashboard loads on ≥3 matchdays  
+-4. `verify_football_evidence_gates.sh` → green  
++1. **C1** `sudo bash deploy/cron-hibs-calibration.sh --install`  
++2. **C2** Dashboard loads on fixture days (or `--seed`)  
++3. **C3** `run_forward_backfill_plan.sh`  
++4. **C4** ≥3 matchdays + `pred-log-sync` → `verify_football_evidence_gates.sh` green  
++
++Run: `./scripts/run_football_evidence_checklist.sh --watch`
+ 
+ ### Racing (automation)
+ 
+diff --git a/scripts/buyer_bootstrap_vps.sh b/scripts/buyer_bootstrap_vps.sh
+index d17dfcf..b589329 100755
+--- a/scripts/buyer_bootstrap_vps.sh
++++ b/scripts/buyer_bootstrap_vps.sh
+@@ -70,13 +70,12 @@ cat <<EOF
+ 
+ Bootstrap complete (${DOMAIN}).
+ 
+-Operator checklist:
++Operator checklist (C1–C4):
+   1. Edit ${APP_ROOT}/.env — API keys, HIBS_AUTH_PASSWORD, optional HIBS_WHITELABEL_*
+   2. systemctl restart hibs-bet
+-  3. Log in and load dashboard during fixture days (seeds audit snapshots)
+-  4. bash scripts/run_forward_backfill_plan.sh  (historic odds repair, API budget)
+-  5. bash scripts/green_forward_evidence.sh --watch
+-  6. bash scripts/export_b2b_data_room.sh
++  3. bash scripts/run_football_evidence_checklist.sh --watch
++     (C1 cron · C2 dashboard on fixture days · C3 backfill · C4 verify gates)
++  4. bash scripts/export_b2b_data_room.sh
+ 
+ Racing (if linked): sudo bash ${APP_ROOT}/deploy/cron-hibs-racing-daily.sh --install
+ 
+diff --git a/scripts/green_forward_evidence.sh b/scripts/green_forward_evidence.sh
+index 8df8ce9..9654893 100755
+--- a/scripts/green_forward_evidence.sh
++++ b/scripts/green_forward_evidence.sh
+@@ -1,6 +1,9 @@
+ #!/usr/bin/env bash
+ # Green forward evidence gates (F7–F9) — institutional-check + verify loop.
+ #
++# Prefer the labelled C1–C4 checklist:
++#   ./scripts/run_football_evidence_checklist.sh [--watch|--remote]
++#
+ # Run on VPS (preferred) or Mac with audit DB + production .env:
+ #   ./scripts/green_forward_evidence.sh
+ #   ./scripts/green_forward_evidence.sh --backfill        # odds repair first (API budget)
+diff --git a/scripts/run_football_evidence_checklist.sh b/scripts/run_football_evidence_checklist.sh
+new file mode 100755
+index 0000000..4460b28
+--- /dev/null
++++ b/scripts/run_football_evidence_checklist.sh
+@@ -0,0 +1,228 @@
++#!/usr/bin/env bash
++# Football forward evidence operator checklist (C1–C4).
++#
++# C1  sudo bash deploy/cron-hibs-calibration.sh --install
++# C2  Load dashboard while logged in on fixture days (seeds snapshots)
++# C3  scripts/run_forward_backfill_plan.sh
++# C4  Wait for ≥3 matchdays + pred-log-sync → verify_football_evidence_gates.sh
++#
++# Usage:
++#   ./scripts/run_football_evidence_checklist.sh              # status + run automated steps
++#   ./scripts/run_football_evidence_checklist.sh --status     # print checklist only
++#   ./scripts/run_football_evidence_checklist.sh --step C1    # single step
++#   ./scripts/run_football_evidence_checklist.sh --seed       # API seed for C2 (API budget)
++#   ./scripts/run_football_evidence_checklist.sh --watch      # C4 poll until buyer_ready
++#   ./scripts/run_football_evidence_checklist.sh --remote     # SSH to VPS (DEPLOY_HOST)
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "${ROOT}"
++
++HOST="${DEPLOY_HOST:-77.68.89.73}"
++USER="${DEPLOY_USER:-root}"
++APP="${DEPLOY_PATH:-/opt/hibs-bet}"
++STATUS_ONLY=0
++SEED=0
++WATCH=0
++REMOTE=0
++RUN_STEPS=1
++STEP_FILTER=""
++INTERVAL="${HIBS_EVIDENCE_WATCH_SEC:-3600}"
++MAX_ROUNDS="${HIBS_EVIDENCE_MAX_ROUNDS:-48}"
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --status) STATUS_ONLY=1; RUN_STEPS=0; shift ;;
++    --seed) SEED=1; shift ;;
++    --watch) WATCH=1; shift ;;
++    --remote) REMOTE=1; shift ;;
++    --no-run) RUN_STEPS=0; shift ;;
++    --step)
++      shift
++      STEP_FILTER="${1:-}"
++      [[ -n "${STEP_FILTER}" ]] || { echo "ERROR: --step requires C1|C2|C3|C4" >&2; exit 2; }
++      shift
++      ;;
++    -h|--help)
++      sed -n '2,16p' "$0"
++      exit 0
++      ;;
++    C1|C2|C3|C4) STEP_FILTER="$1"; shift ;;
++    *) echo "Unknown argument: $1 (see --help)" >&2; exit 2 ;;
++  esac
++done
++
++if [[ "${REMOTE}" -eq 1 ]]; then
++  flags=""
++  [[ "${STATUS_ONLY}" -eq 1 ]] && flags="${flags} --status"
++  [[ "${SEED}" -eq 1 ]] && flags="${flags} --seed"
++  [[ "${WATCH}" -eq 1 ]] && flags="${flags} --watch"
++  [[ "${RUN_STEPS}" -eq 0 ]] && flags="${flags} --no-run"
++  [[ -n "${STEP_FILTER}" ]] && flags="${flags} --step ${STEP_FILTER}"
++  echo "==> Remote checklist on ${USER}@${HOST}:${APP}"
++  ssh -o BatchMode=yes -o ConnectTimeout=25 "${USER}@${HOST}" \
++    "cd '${APP}' && bash scripts/run_football_evidence_checklist.sh ${flags}"
++  exit $?
++fi
++
++if [[ -f "${ROOT}/.env" ]]; then
++  set -a
++  # shellcheck disable=SC1091
++  source "${ROOT}/.env"
++  set +a
++fi
++
++export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
++PY="${ROOT}/.venv/bin/python3"
++[[ -x "${PY}" ]] || PY="python3"
++
++step() { echo ""; echo "==> $*"; }
++
++ensure_evidence_deploy_date() {
++  if grep -q '^HIBS_EVIDENCE_DEPLOY_DATE=' "${ROOT}/.env" 2>/dev/null; then
++    return 0
++  fi
++  local stamp
++  stamp="$(date -u +%Y-%m-%d)"
++  echo "HIBS_EVIDENCE_DEPLOY_DATE=${stamp}" >> "${ROOT}/.env"
++  export HIBS_EVIDENCE_DEPLOY_DATE="${stamp}"
++  step "Set HIBS_EVIDENCE_DEPLOY_DATE=${stamp} in .env"
++}
++
++print_checklist() {
++  "${PY}" -c "
++from hibs_predictor.forward_evidence import football_evidence_checklist
++import json
++d = football_evidence_checklist()
++print('since_deploy:', d.get('since_deploy_iso'))
++print('matchdays_7d:', d.get('matchdays_7d'))
++print('evidence_grade:', d.get('evidence_grade'))
++print('buyer_ready:', d.get('buyer_ready'))
++print('checklist:', d.get('checklist_done'), '/', d.get('checklist_total'))
++print()
++for s in d.get('checklist_steps', []):
++    mark = 'DONE' if s.get('pass') else 'TODO'
++    print(f\"  [{mark}] {s.get('id')}: {s.get('label')}\")
++    print(f\"         {s.get('command')}\")
++    if s.get('message'):
++        print(f\"         {s.get('message')}\")
++if d.get('next_actions'):
++    print()
++    print('Gate next actions:')
++    for a in d['next_actions']:
++        print(f\"  - {a}\")
++"
++}
++
++checklist_json() {
++  "${PY}" -c "
++from hibs_predictor.forward_evidence import football_evidence_checklist
++import json
++print(json.dumps(football_evidence_checklist(), indent=2, default=str))
++"
++}
++
++should_run_step() {
++  local id="$1"
++  [[ -z "${STEP_FILTER}" || "${STEP_FILTER}" == "${id}" ]]
++}
++
++run_c1() {
++  should_run_step C1 || return 0
++  step "C1 — install daily audit cron"
++  if [[ -f "${ROOT}/deploy/cron-hibs-calibration.sh" ]]; then
++    if [[ "$(id -u)" -eq 0 ]]; then
++      bash "${ROOT}/deploy/cron-hibs-calibration.sh" --install
++    else
++      sudo bash "${ROOT}/deploy/cron-hibs-calibration.sh" --install
++    fi
++  else
++    echo "WARN: deploy/cron-hibs-calibration.sh missing" >&2
++  fi
++}
++
++run_c2() {
++  should_run_step C2 || return 0
++  step "C2 — snapshot seeding"
++  if [[ "${SEED}" -eq 1 && -f "${ROOT}/scripts/seed_forward_evidence.sh" ]]; then
++    bash "${ROOT}/scripts/seed_forward_evidence.sh"
++    return 0
++  fi
++  echo "Manual: log in and load the dashboard on fixture days (seeds pre-kickoff snapshots)."
++  echo "API alternative: ./scripts/run_football_evidence_checklist.sh --seed"
++}
++
++run_c3() {
++  should_run_step C3 || return 0
++  step "C3 — forward backfill plan (API budget — may take 20+ min)"
++  if [[ -f "${ROOT}/scripts/run_forward_backfill_plan.sh" ]]; then
++    bash "${ROOT}/scripts/run_forward_backfill_plan.sh"
++  else
++    echo "WARN: scripts/run_forward_backfill_plan.sh missing" >&2
++    return 1
++  fi
++}
++
++run_sync() {
++  step "pred-log-sync (join FT results + closing odds)"
++  "${PY}" -m hibs_predictor.main pred-log-sync --verbose 2>&1 | tail -30 || true
++}
++
++run_c4() {
++  should_run_step C4 || return 0
++  step "C4 — verify football evidence gates"
++  run_sync
++  if bash "${ROOT}/scripts/verify_football_evidence_gates.sh"; then
++    return 0
++  fi
++  return 1
++}
++
++# --- main ---
++step "Football evidence checklist (C1–C4)"
++ensure_evidence_deploy_date
++
++echo ""
++print_checklist
++
++if [[ "${STATUS_ONLY}" -eq 1 ]]; then
++  checklist_json | "${PY}" -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('checklist_complete') else 1)"
++  exit $?
++fi
++
++if [[ "${RUN_STEPS}" -eq 1 ]]; then
++  run_c1 || true
++  run_c2 || true
++  if should_run_step C3; then
++    run_c3 || echo "WARN: C3 backfill incomplete" >&2
++    run_sync
++  fi
++fi
++
++round=1
++while true; do
++  if run_c4; then
++    echo ""
++    print_checklist
++    echo ""
++    echo "GREEN — checklist complete, buyer_ready=true"
++    echo "Next: ./scripts/export_b2b_data_room.sh"
++    exit 0
++  fi
++
++  if [[ "${WATCH}" -ne 1 || "${round}" -ge "${MAX_ROUNDS}" ]]; then
++    echo ""
++    print_checklist
++    echo ""
++    echo "AMBER — checklist not complete."
++    echo "  C2: load dashboard on fixture days (or re-run with --seed)"
++    echo "  C4: re-run after ≥3 matchdays + pred-log-sync"
++    echo "  Watch: ./scripts/run_football_evidence_checklist.sh --watch"
++    exit 1
++  fi
++
++  echo ""
++  echo "Watch round ${round}/${MAX_ROUNDS} — sleeping ${INTERVAL}s…"
++  sleep "${INTERVAL}"
++  round=$((round + 1))
++done
+diff --git a/scripts/verify_football_evidence_gates.sh b/scripts/verify_football_evidence_gates.sh
+index 3481846..8514092 100755
+--- a/scripts/verify_football_evidence_gates.sh
++++ b/scripts/verify_football_evidence_gates.sh
+@@ -36,11 +36,17 @@ fi
+ echo "==> Forward evidence gates (B2B buyer_ready)"
+ echo "${OUT}" | "${PY}" -c "
+ import json, sys
++from hibs_predictor.forward_evidence import football_evidence_checklist
+ d = json.load(sys.stdin)
++chk = football_evidence_checklist()
+ print('since_deploy:', d.get('since_deploy_iso'))
+ print('matchdays_7d:', d.get('matchdays_7d'))
+ print('evidence_grade:', d.get('evidence_grade'))
+ print('buyer_ready:', d.get('buyer_ready'))
++print('checklist:', chk.get('checklist_done'), '/', chk.get('checklist_total'))
++for s in chk.get('checklist_steps', []):
++    mark = 'DONE' if s.get('pass') else 'TODO'
++    print(f\"  [{mark}] {s.get('id')}: {s.get('label')}\")
+ print()
+ for g in d.get('gates', []):
+     mark = 'PASS' if g.get('pass') else 'FAIL'
+diff --git a/src/hibs_predictor/forward_evidence.py b/src/hibs_predictor/forward_evidence.py
+index 013f02f..fc9c701 100644
+--- a/src/hibs_predictor/forward_evidence.py
++++ b/src/hibs_predictor/forward_evidence.py
+@@ -2,8 +2,10 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ import os
+ from datetime import datetime, timedelta, timezone
++from pathlib import Path
+ from typing import Any, Dict, List, Optional
+ 
+ from dotenv import load_dotenv
+@@ -231,12 +233,15 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
+     actions: List[str] = []
+     by_id = {g["id"]: g for g in gates}
+     if not by_id.get("F3_cron", {}).get("pass"):
+-        actions.append("sudo bash deploy/cron-hibs-calibration.sh --install")
++        actions.append("C1: sudo bash deploy/cron-hibs-calibration.sh --install")
+     if not by_id.get("F7_forward_capture_7d", {}).get("pass"):
+-        actions.append("bash scripts/run_forward_backfill_plan.sh")
+-        actions.append("Load dashboard while logged in during fixture days (seeds snapshots).")
++        actions.append("C2: Load dashboard while logged in on fixture days (seeds snapshots).")
++        actions.append("C3: bash scripts/run_forward_backfill_plan.sh")
+     if not by_id.get("F8_clv_sample", {}).get("pass"):
+-        actions.append("Wait for matchdays + daily pred-log-sync; do not scale stakes until n≥25.")
++        actions.append(
++            f"C4: Wait for ≥{MIN_MATCHDAYS_BEFORE_CAPTURE_GATE} matchdays + daily pred-log-sync; "
++            "re-run ./scripts/verify_football_evidence_gates.sh"
++        )
+     if not since:
+         actions.append("Set HIBS_EVIDENCE_DEPLOY_DATE in .env (or deploy via link_production.sh for .deploy-revision).")
+     if not actions:
+@@ -244,6 +249,121 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
+     return actions
+ 
+ 
++def _backfill_plan_status(*, since_iso: Optional[str]) -> Dict[str, Any]:
++    """Whether scripts/run_forward_backfill_plan.sh has produced a manifest (C3)."""
++    repo = Path(__file__).resolve().parents[2]
++    path = repo / "data" / "backtest_profiles" / "forward_backfill_plan.json"
++    if not path.is_file():
++        return {
++            "done": False,
++            "path": str(path),
++            "message": "C3 not run — bash scripts/run_forward_backfill_plan.sh",
++        }
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError) as exc:
++        return {"done": False, "path": str(path), "message": f"Unreadable backfill manifest: {exc}"}
++    generated = (data.get("generated_at") or "").strip()
++    done = bool(generated)
++    if done and since_iso and generated < since_iso:
++        done = False
++        msg = f"Backfill manifest predates deploy ({since_iso[:10]}) — re-run C3."
++    elif done:
++        msg = f"Backfill manifest at {generated[:19]}Z"
++    else:
++        msg = "Backfill manifest missing generated_at — re-run C3."
++    return {
++        "done": done,
++        "path": str(path),
++        "generated_at": generated or None,
++        "message": msg,
++    }
++
++
++def football_evidence_checklist() -> Dict[str, Any]:
++    """
++    Operator checklist C1–C4 toward ``forward_evidence.buyer_ready``.
++
++    C1  Install daily audit cron on VPS
++    C2  Seed pre-kickoff snapshots (dashboard loads or API seed)
++    C3  Historic odds repair via run_forward_backfill_plan.sh
++    C4  ≥3 matchdays + pred-log-sync → verify_football_evidence_gates.sh green
++    """
++    report = forward_evidence_gates()
++    since = report.get("since_deploy_iso")
++    matchdays = int(report.get("matchdays_7d") or 0)
++    cap_7d = report.get("odds_capture_7d") or {}
++    n_snapshots = int(cap_7d.get("n_snapshots") or 0)
++    by_id = {g["id"]: g for g in report.get("gates", [])}
++
++    c1_pass = bool(by_id.get("F3_cron", {}).get("pass"))
++    c2_pass = matchdays >= 1 or n_snapshots > 0
++    backfill = _backfill_plan_status(since_iso=since)
++    c3_pass = bool(backfill.get("done"))
++    c4_pass = bool(report.get("buyer_ready"))
++    c4_ready_to_verify = matchdays >= MIN_MATCHDAYS_BEFORE_CAPTURE_GATE
++
++    steps: List[Dict[str, Any]] = [
++        {
++            "id": "C1",
++            "label": "Daily audit cron (pred-log-sync pipeline)",
++            "pass": c1_pass,
++            "automated": True,
++            "command": "sudo bash deploy/cron-hibs-calibration.sh --install",
++            "message": by_id.get("F3_cron", {}).get("message", ""),
++        },
++        {
++            "id": "C2",
++            "label": "Snapshot seeding on fixture days",
++            "pass": c2_pass,
++            "automated": False,
++            "command": "Load dashboard while logged in on fixture days",
++            "alt_command": "bash scripts/seed_forward_evidence.sh",
++            "message": (
++                f"{matchdays} matchday(s), {n_snapshots} snapshot(s) in 7d."
++                if c2_pass
++                else "No snapshots in 7d — log in and load dashboard during fixture window."
++            ),
++        },
++        {
++            "id": "C3",
++            "label": "Forward backfill plan (odds repair)",
++            "pass": c3_pass,
++            "automated": True,
++            "command": "bash scripts/run_forward_backfill_plan.sh",
++            "message": backfill.get("message", ""),
++        },
++        {
++            "id": "C4",
++            "label": "Verify gates after matchdays + sync",
++            "pass": c4_pass,
++            "automated": True,
++            "command": "./scripts/verify_football_evidence_gates.sh",
++            "message": (
++                "buyer_ready=true"
++                if c4_pass
++                else (
++                    f"Need ≥{MIN_MATCHDAYS_BEFORE_CAPTURE_GATE} matchdays (have {matchdays}) "
++                    "and daily pred-log-sync before F7–F9 pass."
++                    if not c4_ready_to_verify
++                    else "Matchday threshold met — run pred-log-sync and verify gates."
++                )
++            ),
++        },
++    ]
++
++    done_count = sum(1 for s in steps if s["pass"])
++    return {
++        **report,
++        "checklist_steps": steps,
++        "checklist_done": done_count,
++        "checklist_total": len(steps),
++        "checklist_complete": done_count == len(steps),
++        "c4_ready_to_verify": c4_ready_to_verify,
++        "backfill_plan": backfill,
++    }
++
++
+ def _count_matchdays(*, days: int, since_iso: Optional[str]) -> int:
+     """Distinct UTC kickoff dates with ≥1 snapshot in window."""
+     from hibs_predictor.prediction_log import _db_path, _enabled, init_db
+diff --git a/tests/test_forward_evidence.py b/tests/test_forward_evidence.py
+index 3b27bfe..c3704f3 100644
+--- a/tests/test_forward_evidence.py
++++ b/tests/test_forward_evidence.py
+@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
+ 
+ import pytest
+ 
+-from hibs_predictor.forward_evidence import forward_evidence_gates
++from hibs_predictor.forward_evidence import football_evidence_checklist, forward_evidence_gates
+ 
+ 
+ @pytest.fixture
+@@ -65,3 +65,29 @@ def test_forward_capture_passes_with_odds(audit_db):
+     cap = next(g for g in rep["gates"] if g["id"] == "F7_forward_capture_7d")
+     assert cap["pass"] is True
+     assert float(cap["actual"]) >= 50.0
++
++
++def test_football_evidence_checklist_steps(audit_db):
++    rep = football_evidence_checklist()
++    steps = {s["id"]: s for s in rep["checklist_steps"]}
++    assert set(steps) == {"C1", "C2", "C3", "C4"}
++    assert steps["C2"]["pass"] is True
++    assert rep["checklist_done"] >= 2
++
++
++def test_backfill_plan_status_since_deploy(audit_db):
++    from pathlib import Path
++
++    from hibs_predictor.forward_evidence import _backfill_plan_status
++
++    repo = Path(__file__).resolve().parents[1]
++    out = repo / "data" / "backtest_profiles" / "forward_backfill_plan.json"
++    out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text('{"generated_at": "2026-06-10T12:00:00+00:00"}', encoding="utf-8")
++    try:
++        st = _backfill_plan_status(since_iso="2026-06-01T00:00:00+00:00")
++        assert st["done"] is True
++        st_old = _backfill_plan_status(since_iso="2026-06-15T00:00:00+00:00")
++        assert st_old["done"] is False
++    finally:
++        out.unlink(missing_ok=True)
+-- 
+2.43.0
+
