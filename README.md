@@ -65,6 +65,28 @@ exchange/sharp line** disagrees are flagged as likely hallucinations and filtere
 
 **Circuit breakers:** failed feeds fall back to cached lines instead of crashing the UI.
 
+### Matchbook arb execution (optional — real money)
+
+Scans cross-book 1X2 dutch arbs and can place **Matchbook legs only** via Edge API.
+
+```bash
+# Always starts in DRY-RUN (logs offers, does not bet)
+python arb_worker.py --fixtures "Arsenal v Chelsea:12345:67890" --execute
+
+# LIVE — requires both flags + small stake caps
+export MATCHBOOK_AUTO_TRADE=1
+export MATCHBOOK_CONFIRM_LIVE=YES
+export MATCHBOOK_MAX_STAKE=2.00
+export MATCHBOOK_MAX_OUTLAY=6.00
+export ARB_MIN_PROFIT_PCT=0.5
+python arb_worker.py --fixtures "..." --execute
+```
+
+API: `GET /arb/{fixture_key}` · `POST /arb/execute`
+
+> **Risk:** Partial dutch (legs on other books) is **not** locked profit unless you place all legs.
+> Default blocks partial auto-exec unless `MATCHBOOK_ALLOW_PARTIAL_DUTCH=1`.
+
 - **Value Scan** — set bankroll / min edge % / Kelly fraction (sidebar), pick leagues and
   season, choose days ahead, then **Run Scan**. Results show **bookmaker**, **exchange vs
   soft prices**, **bet links**, and edge sorted by your chosen shopping channel.

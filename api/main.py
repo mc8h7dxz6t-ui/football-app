@@ -45,11 +45,15 @@ class ValueScanRequest(BaseModel):
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    from execution.risk import RiskConfig
+
     cache = get_cache()
+    risk = RiskConfig()
     return {
         "status": "ok",
         "cache_backend": cache.backend,
         "breakers": breakers.all_status(),
+        "execution": risk.status(),
     }
 
 
@@ -154,6 +158,45 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         )
     picks.sort(key=lambda p: p["edge_pct"], reverse=True)
     return {"fixture_key": req.fixture_key, "picks": picks, "sharp_fair_probs": sharp_fair}
+
+
+class ArbExecuteRequest(BaseModel):
+    fixture_key: str
+    opportunity_index: int = 0
+    total_outlay: Optional[float] = None
+
+
+@app.get("/arb/{fixture_key}")
+def list_arbs(fixture_key: str, min_profit_pct: float = 0.3) -> Dict[str, Any]:
+    from engine.arb import scan_arbitrage
+
+    cache = get_cache()
+    ticks = cache.get_peak_ticks(fixture_key)
+    if not ticks:
+        raise HTTPException(404, "No lines cached for fixture")
+    opps = scan_arbitrage(ticks, fixture_key=fixture_key, min_profit_pct=min_profit_pct)
+    return {"fixture_key": fixture_key, "count": len(opps), "opportunities": [o.to_dict() for o in opps]}
+
+
+@app.post("/arb/execute")
+def execute_arb(req: ArbExecuteRequest) -> Dict[str, Any]:
+    from engine.arb import scan_arbitrage
+    from execution.matchbook_executor import execute_matchbook_arb
+    from execution.risk import RiskConfig
+
+    cache = get_cache()
+    ticks = cache.get_peak_ticks(req.fixture_key)
+    if not ticks:
+        raise HTTPException(404, "No lines cached")
+    opps = scan_arbitrage(ticks, fixture_key=req.fixture_key)
+    if req.opportunity_index >= len(opps):
+        raise HTTPException(404, "Opportunity index out of range")
+    result = execute_matchbook_arb(
+        opps[req.opportunity_index],
+        risk=RiskConfig(),
+        total_outlay=req.total_outlay,
+    )
+    return result.to_dict()
 
 
 @app.get("/devig/demo")
