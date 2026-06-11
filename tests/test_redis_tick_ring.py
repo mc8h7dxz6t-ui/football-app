@@ -1,6 +1,6 @@
 import time
 
-from pipeline.redis_tick_ring import MemoryTickRing
+from pipeline.redis_tick_ring import MemoryTickRing, serialize_ring_member
 from pipeline.tick import PriceTick
 
 
@@ -25,6 +25,13 @@ def test_memory_ring_purges_outside_window():
     now = time.time()
     assert ring.get_peak_odds("Home", now=now) == 2.2
     assert len(ring.ticks_in_window(now=now)) == 1
+
+
+def test_serialize_ring_member_unique_for_identical_price():
+    tick = PriceTick("A v B", "Home", "Home", 2.1, "Matchbook", "matchbook")
+    m1 = serialize_ring_member(tick, now=1000.0)
+    m2 = serialize_ring_member(tick, now=1000.0)
+    assert m1 != m2
 
 
 def test_memory_ring_peak_within_window():

@@ -4,15 +4,38 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from pipeline.tick import PriceTick
-from pipeline.tick_history import peak_ticks_in_window, selection_key
+from pipeline.tick_history import peak_ticks_in_window
+
+_RING_META_KEYS = ("_seq", "_uuid", "_ns")
 
 
 def _ring_key(fixture_key: str, market: str) -> str:
     return f"fve:zring:{fixture_key}:{market}"
+
+
+def serialize_ring_member(tick: PriceTick, *, now: Optional[float] = None) -> str:
+    """Build a unique ZSET member — identical back-to-back prices must not collide."""
+    now = now if now is not None else time.time()
+    payload = tick.to_dict()
+    payload["_seq"] = now
+    payload["_ns"] = time.time_ns()
+    payload["_uuid"] = str(uuid.uuid4())
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def parse_ring_member(member: str) -> Optional[PriceTick]:
+    try:
+        data = json.loads(member)
+        for k in _RING_META_KEYS:
+            data.pop(k, None)
+        return PriceTick.from_dict(data)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
 
 
 class TickRing(ABC):
@@ -46,7 +69,7 @@ class TickRing(ABC):
 
 
 class RedisTickRing(TickRing):
-    """Redis sorted-set ring — O(log N) append + range purge."""
+    """Redis sorted-set ring — atomic ZADD + ZREMRANGEBYSCORE pipeline."""
 
     def __init__(
         self,
@@ -66,9 +89,7 @@ class RedisTickRing(TickRing):
 
     def append_tick(self, tick: PriceTick) -> None:
         now = time.time()
-        payload = tick.to_dict()
-        payload["_seq"] = now
-        member = json.dumps(payload, separators=(",", ":"))
+        member = serialize_ring_member(tick, now=now)
         pipe = self.r.pipeline()
         pipe.zadd(self.key, {member: now})
         pipe.zremrangebyscore(self.key, "-inf", now - self.window_sec)
@@ -85,12 +106,9 @@ class RedisTickRing(TickRing):
         raw = self.r.zrangebyscore(self.key, now - self.window_sec, now)
         out: List[PriceTick] = []
         for member in raw or []:
-            try:
-                data = json.loads(member)
-                data.pop("_seq", None)
-                out.append(PriceTick.from_dict(data))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                continue
+            tick = parse_ring_member(member)
+            if tick is not None:
+                out.append(tick)
         return out
 
 
@@ -101,21 +119,22 @@ class MemoryTickRing(TickRing):
         self.fixture_key = fixture_key
         self.market = market
         self.window_sec = window_sec
-        self._entries: List[tuple[float, PriceTick]] = []
+        self._entries: List[tuple[float, str, PriceTick]] = []
 
     def append_tick(self, tick: PriceTick) -> None:
         now = time.time()
-        self._entries.append((now, tick))
+        member = serialize_ring_member(tick, now=now)
+        self._entries.append((now, member, tick))
         self.purge_expired(now=now)
 
     def purge_expired(self, *, now: Optional[float] = None) -> int:
         now = now or time.time()
         cutoff = now - self.window_sec
         before = len(self._entries)
-        self._entries = [(ts, t) for ts, t in self._entries if ts >= cutoff]
+        self._entries = [(ts, m, t) for ts, m, t in self._entries if ts >= cutoff]
         return before - len(self._entries)
 
     def ticks_in_window(self, *, now: Optional[float] = None) -> List[PriceTick]:
         now = now or time.time()
         cutoff = now - self.window_sec
-        return [t for ts, t in self._entries if ts >= cutoff]
+        return [t for ts, _, t in self._entries if ts >= cutoff]

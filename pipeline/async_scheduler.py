@@ -1,11 +1,11 @@
-"""Async tiered scheduler — 250ms loop, non-blocking feed polls."""
+"""Async tiered scheduler — 250ms loop, thread-safe in-flight task guard."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from feeds.base import FeedAdapter
 from feeds.registry import FeedRegistry, build_default_registry
@@ -14,8 +14,48 @@ from pipeline.ingest import SCHEDULER_TICK_SEC, ingest_feed
 log = logging.getLogger(__name__)
 
 
+class AsyncSchedulerGuard:
+    """Thread-safe lifecycle wrapper for blocking feed polls off the event loop."""
+
+    def __init__(self) -> None:
+        self._in_flight: Set[str] = set()
+        self._lock = asyncio.Lock()
+
+    @property
+    def in_flight(self) -> Set[str]:
+        return set(self._in_flight)
+
+    async def execute_safely(
+        self,
+        task_id: str,
+        blocking_func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        """Run blocking work in a thread pool; skip if task_id already running."""
+        async with self._lock:
+            if task_id in self._in_flight:
+                log.debug("Task %s already running — skipping cycle", task_id)
+                return False
+            self._in_flight.add(task_id)
+
+        try:
+            await asyncio.to_thread(blocking_func, *args, **kwargs)
+            return True
+        except Exception as exc:
+            log.error("Error executing background task %s: %s", task_id, exc)
+            return False
+        finally:
+            async with self._lock:
+                self._in_flight.discard(task_id)
+
+
+def task_id_for_feed(feed_name: str, fixture_key: str) -> str:
+    return f"feed:{feed_name}:{fixture_key}"
+
+
 class AsyncTieredScheduler:
-    """Schedule feed polls without blocking the core scheduler tick."""
+    """Schedule feed polls without blocking the core 250ms scheduler tick."""
 
     def __init__(
         self,
@@ -24,33 +64,20 @@ class AsyncTieredScheduler:
         registry: Optional[FeedRegistry] = None,
         *,
         tick_sec: float = SCHEDULER_TICK_SEC,
-        skip_if_inflight: bool = True,
+        guard: Optional[AsyncSchedulerGuard] = None,
     ) -> None:
         self.fixture_keys = fixture_keys
         self.contexts = contexts
         self.registry = registry or build_default_registry()
         self.feeds = self.registry.enabled()
         self.tick_sec = tick_sec
-        self.skip_if_inflight = skip_if_inflight
+        self.guard = guard or AsyncSchedulerGuard()
         self._next_run: Dict[tuple[str, str], float] = {}
-        self._inflight: Set[str] = set()
         self._cycles = 0
 
-    def _task_key(self, fixture_key: str, feed_name: str) -> str:
-        return f"{fixture_key}:{feed_name}"
-
     async def _poll_feed(self, feed: FeedAdapter, fixture_key: str, ctx: Dict[str, Any]) -> None:
-        key = self._task_key(fixture_key, feed.name)
-        if self.skip_if_inflight and key in self._inflight:
-            log.debug("skip inflight %s", key)
-            return
-        self._inflight.add(key)
-        try:
-            await asyncio.to_thread(ingest_feed, feed, fixture_key, context=ctx)
-        except Exception:
-            log.exception("async ingest failed %s", key)
-        finally:
-            self._inflight.discard(key)
+        tid = task_id_for_feed(feed.name, fixture_key)
+        await self.guard.execute_safely(tid, ingest_feed, feed, fixture_key, context=ctx)
 
     async def start_loop(self, max_cycles: Optional[int] = None) -> None:
         intervals = {f.name: f.poll_interval_sec for f in self.feeds}
