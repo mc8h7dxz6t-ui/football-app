@@ -20,16 +20,30 @@ After apply, run on VPS:
 
 ## How to apply (hibs-bet repo, write access)
 
+**You must be inside a `hibs-bet` git clone** — `cd hibs-bet` alone fails if you never cloned.
+
 ```bash
-git clone https://github.com/mc8h7dxz6t-ui/hibs-bet && cd hibs-bet
+# 1) Clone (skip if you already have the repo — then cd into it)
+git clone https://github.com/mc8h7dxz6t-ui/hibs-bet.git ~/hibs-bet
+cd ~/hibs-bet
+
+# 2) Branch + patch (https:// required on the curl URL)
 git checkout -b cursor/forward-evidence-checklist-c4a1
 
 curl -L -o checklist.patch \
   https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/cursor/forward-evidence-checklist-c4a1/hibs-bet-forward-evidence-checklist.patch
 
 git am checklist.patch
-python -m pytest tests/test_forward_evidence.py -q
+python3 -m pytest tests/test_forward_evidence.py -q
 git push -u origin cursor/forward-evidence-checklist-c4a1
+```
+
+If you already downloaded `checklist.patch` in `~`, you can reuse it:
+
+```bash
+cd ~/hibs-bet   # your existing clone
+git checkout -b cursor/forward-evidence-checklist-c4a1
+git am ~/checklist.patch
 ```
 
 Open a PR into `hibs-bet` `main`, then on VPS:
