@@ -40,6 +40,19 @@ Live fixture/odds data needs a free [API-Football](https://www.api-football.com)
 
 Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge in `odds_sources.py`.
 
+### Inst++ stack (optional)
+
+| Component | Command / path |
+|-----------|----------------|
+| Pro deps | `pip install -r requirements-pro.txt` |
+| API | `uvicorn api.main:app --port 8000` |
+| Ingest worker | `python worker.py --fixtures 'key:id:matchbook_id' --interval 5` |
+| Celery (optional) | `celery -A tasks.celery_app worker -B` |
+| Redis | `docker compose up -d redis` — set `REDIS_URL` |
+| Matchbook | `MATCHBOOK_USERNAME` + `MATCHBOOK_PASSWORD` |
+
+Streamlit should use `FVE_API_URL=http://localhost:8000` when the ingest layer is running.
+
 ### Linting
 
 No linter is configured in this repo. Validation is via `pytest -q`.

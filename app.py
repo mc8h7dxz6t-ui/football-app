@@ -15,6 +15,9 @@ from odds_sources import (
     get_odds_api_key,
     racing_offers,
 )
+from engine.fair_value import benchmark_vs_sharp
+from pipeline.ingest import build_fixture_1x2_sharp_line
+from services.api_client import FveApiClient
 from xg_sources import attach_xg
 
 # ======================
@@ -153,8 +156,25 @@ with st.sidebar:
     )
     if merge_odds_api and not get_odds_api_key():
         st.caption("⚠️ ODDS_API_KEY not set — only API-Football books will be used.")
+    st.subheader("Inst++ pipeline")
+    fve_api = FveApiClient()
+    api_live = fve_api.available()
+    use_inst_pipeline = st.checkbox(
+        "Use FastAPI ingest layer (Redis cache)",
+        value=api_live,
+        help="UI reads cached lines from api/main.py — never polls books directly.",
+    )
+    if use_inst_pipeline and not api_live:
+        st.caption("⚠️ Start API: `uvicorn api.main:app --port 8000` + `python worker.py`")
+    filter_hallucinations = st.checkbox(
+        "Reject picks model likes but sharp line rejects",
+        value=True,
+        help="De-vig exchange/sharp books; skip likely hallucinated value.",
+    )
 
-scan_tab, backtest_tab, racing_tab = st.tabs(["Value Scan", "Backtest", "Racing Shop"])
+scan_tab, backtest_tab, racing_tab, inst_tab = st.tabs(
+    ["Value Scan", "Backtest", "Racing Shop", "Inst++ Status"]
+)
 
 # ---------------------- Value Scan ----------------------
 with scan_tab:
@@ -197,7 +217,56 @@ with scan_tab:
                         league_name=league_name if merge_odds_api else "",
                         odds_api_events=odds_api_events if merge_odds_api else None,
                     )
+                    if use_inst_pipeline and api_live:
+                        try:
+                            fve_api.ingest(
+                                {
+                                    "fixture_key": fixture_label,
+                                    "fixture_id": fixture_id,
+                                    "home_team": home_name,
+                                    "away_team": away_name,
+                                    "event_label": fixture_label,
+                                }
+                            )
+                            vs = fve_api.value_scan(
+                                {
+                                    "fixture_key": fixture_label,
+                                    "home_stats": standings[home_id],
+                                    "away_stats": standings[away_id],
+                                    "min_edge_pct": min_edge,
+                                    "bankroll": bankroll,
+                                    "kelly_fraction": kelly_frac,
+                                    "use_xg": use_xg,
+                                    "shop_channel": shop_channel,
+                                }
+                            )
+                            for p in vs.get("picks", []):
+                                results.append(
+                                    [
+                                        league_name,
+                                        fixture_label,
+                                        p["market"],
+                                        p["odds"],
+                                        p.get("bookmaker", ""),
+                                        shop_channel,
+                                        p.get("bet_url", ""),
+                                        None,
+                                        "",
+                                        None,
+                                        "",
+                                        p["model_prob"],
+                                        p["edge_pct"],
+                                        p["stake"],
+                                        p.get("edge_vs_sharp_pct"),
+                                        kickoff,
+                                    ]
+                                )
+                            continue
+                        except Exception:
+                            pass
+
                     shopped = shop_lines(offers)
+                    sharp_fair = build_fixture_1x2_sharp_line(shopped)
                     home, away = standings[home_id], standings[away_id]
                     probs = {**match_model(home, away, use_xg=use_xg), **goal_model(home, away, use_xg=use_xg)}
                     for sel, prob in probs.items():
@@ -208,6 +277,18 @@ with scan_tab:
                         e = edge(prob, odds)
                         if e < min_edge:
                             continue
+                        edge_sharp = None
+                        if filter_hallucinations and sharp_fair:
+                            bench = benchmark_vs_sharp(
+                                selection=sel,
+                                soft_odds=odds,
+                                sharp_line_probs=sharp_fair,
+                                model_prob=prob,
+                            )
+                            if bench and bench.likely_hallucination:
+                                continue
+                            if bench:
+                                edge_sharp = bench.edge_vs_sharp_pct
                         stake = bankroll * kelly(prob, odds) * kelly_frac
                         exch = shopped[sel]["exchange"]
                         soft = shopped[sel]["soft"]
@@ -227,6 +308,7 @@ with scan_tab:
                                 prob,
                                 e,
                                 stake,
+                                edge_sharp,
                                 kickoff,
                             ]
                         )
@@ -253,6 +335,7 @@ with scan_tab:
                     "Model Prob",
                     "Edge %",
                     "Stake £",
+                    "Edge vs Sharp %",
                     "Kickoff",
                 ],
             )
@@ -391,5 +474,39 @@ with racing_tab:
                         "soft_url": st.column_config.LinkColumn("Soft book", display_text="Open"),
                     },
                 )
+
+# ---------------------- Inst++ Status ----------------------
+with inst_tab:
+    st.caption("Decoupled ingest pipeline: feeds → Redis → workers → API → UI")
+    if api_live:
+        try:
+            h = fve_api.health()
+            st.json(h)
+        except Exception as exc:
+            st.error(f"API health check failed: {exc}")
+    else:
+        st.info(
+            "Start institutional stack:\n\n"
+            "```bash\n"
+            "docker compose up -d redis postgres\n"
+            "pip install -r requirements-pro.txt\n"
+            "uvicorn api.main:app --port 8000\n"
+            "python worker.py --fixtures 'TeamA v TeamB:fixture_id:matchbook_event_id'\n"
+            "```"
+        )
+    st.markdown(
+        """
+**Architecture**
+```
+Matchbook / API-Football / (Betfair stub)
+        → ingest worker (5s poll)
+        → Redis dedupe cache
+        → Shin de-vig sharp synthetic line
+        → FastAPI /value-scan
+        → Streamlit (no direct book calls)
+```
+**Matchbook:** set `MATCHBOOK_USERNAME` + `MATCHBOOK_PASSWORD` and map `matchbook_event_id` in worker fixtures.
+        """
+    )
 
 st.caption("Analytical/research tool only. Betting carries financial risk; validate before staking real money.")

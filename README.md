@@ -32,6 +32,38 @@ or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitigno
 streamlit run app.py
 ```
 
+### Inst++ pipeline (decoupled ingest)
+
+The UI should **not** call book APIs directly in production. Use the FastAPI + worker stack:
+
+```bash
+pip install -r requirements-pro.txt
+docker compose up -d redis postgres   # optional but recommended
+
+export API_SPORTS_KEY="..."
+export MATCHBOOK_USERNAME="..."       # your Matchbook API access
+export MATCHBOOK_PASSWORD="..."
+export REDIS_URL="redis://localhost:6379/0"
+
+uvicorn api.main:app --port 8000
+python worker.py --fixtures "Arsenal v Chelsea:12345:67890" --interval 5
+streamlit run app.py   # enable "Use FastAPI ingest layer" in sidebar
+```
+
+```
+Matchbook / API-Football feeds
+        → worker (poll) → Redis dedupe cache
+        → Shin de-vig sharp synthetic line
+        → Postgres snapshots (optional)
+        → FastAPI /ingest /lines /value-scan
+        → Streamlit / React frontend
+```
+
+**Sharp benchmark:** picks where your Poisson model shows edge but the **de-vigged
+exchange/sharp line** disagrees are flagged as likely hallucinations and filtered out.
+
+**Circuit breakers:** failed feeds fall back to cached lines instead of crashing the UI.
+
 - **Value Scan** — set bankroll / min edge % / Kelly fraction (sidebar), pick leagues and
   season, choose days ahead, then **Run Scan**. Results show **bookmaker**, **exchange vs
   soft prices**, **bet links**, and edge sorted by your chosen shopping channel.

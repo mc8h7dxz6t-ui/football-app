@@ -1,0 +1,7 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements-pro.txt requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-pro.txt psycopg[binary]>=3.2
+COPY . .
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
