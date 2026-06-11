@@ -9,6 +9,7 @@ Usage:
   python worker.py --fixtures "arsenal-v-chelsea:12345:67890"
 
   # legacy uniform 5s poll (all feeds together):
+  python worker.py --fixtures "..." --sync          # blocking tiered loop
   python worker.py --fixtures "..." --uniform-interval 5
 
 Fixture spec (comma-separated):
@@ -64,6 +65,11 @@ def main() -> None:
         help="If set, poll ALL feeds on this fixed interval (legacy mode)",
     )
     ap.add_argument("--max-cycles", type=int, default=None)
+    ap.add_argument(
+        "--sync",
+        action="store_true",
+        help="use blocking sync scheduler instead of async 250ms loop",
+    )
     args = ap.parse_args()
     keys, contexts = _parse_fixtures(args.fixtures)
     if not keys:
@@ -76,6 +82,7 @@ def main() -> None:
         contexts=contexts,
         max_cycles=args.max_cycles,
         tiered=tiered,
+        async_mode=not args.sync,
     )
 
 

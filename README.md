@@ -53,7 +53,7 @@ streamlit run app.py   # enable "Use FastAPI ingest layer" in sidebar
 
 ```
 Matchbook / API-Football feeds
-        → worker (poll) → Redis dedupe cache
+        → async worker (250ms scheduler) → Redis ZSET tick rings
         → Shin de-vig sharp synthetic line
         → Postgres snapshots (optional)
         → FastAPI /ingest /lines /value-scan

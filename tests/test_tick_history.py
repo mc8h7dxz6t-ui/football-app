@@ -32,7 +32,7 @@ def test_cache_merge_appends_history():
     cache.merge_ticks("x v y", t1, feed_name="matchbook")
     stats = cache.merge_ticks("x v y", t2, feed_name="matchbook")
     assert stats["changed"] == 1
-    hist = cache.get_tick_history("x v y")
+    hist = cache.get_tick_history("x v y", since=time.time() - 60)
     assert len(hist) >= 1
     peak = cache.get_peak_ticks("x v y", window_sec=60)
     assert peak[0].odds == 2.1

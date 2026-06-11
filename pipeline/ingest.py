@@ -206,8 +206,14 @@ def run_ingest_loop(
     contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     max_cycles: Optional[int] = None,
     tiered: bool = True,
+    async_mode: bool = True,
 ) -> None:
-    """Blocking poll loop. Default: tiered per-feed scheduling."""
+    """Poll loop. Default: async tiered scheduler (250ms tick, non-blocking feeds)."""
+    if tiered and async_mode:
+        from pipeline.async_scheduler import run_async_tiered_ingest_loop
+
+        run_async_tiered_ingest_loop(fixture_keys, contexts=contexts, max_cycles=max_cycles)
+        return
     if tiered:
         run_tiered_ingest_loop(fixture_keys, contexts=contexts, max_cycles=max_cycles)
         return

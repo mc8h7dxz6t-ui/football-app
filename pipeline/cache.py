@@ -1,4 +1,4 @@
-"""Redis in-memory line cache with tick history ring buffer."""
+"""Redis ZSET tick rings + snapshot cache."""
 
 from __future__ import annotations
 
@@ -7,24 +7,23 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+from pipeline.redis_tick_ring import MemoryTickRing, RedisTickRing, TickRing
 from pipeline.tick import PriceTick
 from pipeline.tick_history import merge_snapshot, peak_ticks_in_window
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _TTL_SEC = int(os.environ.get("LINE_CACHE_TTL_SEC", "120"))
-_HISTORY_MAX = int(os.environ.get("TICK_HISTORY_MAX", "2000"))
 _PEAK_WINDOW_SEC = float(os.environ.get("PEAK_ODDS_WINDOW_SEC", "5"))
 
 
 class LineCache:
-    """Fixture-level tick store + append-only history for intra-window moves."""
+    """Fixture snapshot + per-market rolling ZSET rings for peak-window odds."""
 
     def __init__(self, redis_url: str = _REDIS_URL, ttl_sec: int = _TTL_SEC) -> None:
         self.ttl_sec = ttl_sec
-        self.history_max = _HISTORY_MAX
         self.peak_window_sec = _PEAK_WINDOW_SEC
         self._memory: Dict[str, Dict[str, Any]] = {}
-        self._history_mem: Dict[str, List[Dict[str, Any]]] = {}
+        self._rings_mem: Dict[str, TickRing] = {}
         self._redis = None
         self._redis_ok = False
         try:
@@ -39,16 +38,27 @@ class LineCache:
 
     @property
     def backend(self) -> str:
-        return "redis" if self._redis_ok else "memory"
+        return "redis-zset" if self._redis_ok else "memory-zset"
 
     def _key_ticks(self, fixture_key: str) -> str:
         return f"fve:ticks:{fixture_key}"
 
-    def _key_history(self, fixture_key: str) -> str:
-        return f"fve:history:{fixture_key}"
-
     def _key_meta(self, fixture_key: str) -> str:
         return f"fve:meta:{fixture_key}"
+
+    def _ring(self, fixture_key: str, market: str) -> TickRing:
+        rk = f"{fixture_key}:{market}"
+        if self._redis_ok and self._redis:
+            return RedisTickRing(
+                self._redis,
+                fixture_key,
+                market,
+                window_sec=self.peak_window_sec,
+                ttl_sec=self.ttl_sec,
+            )
+        if rk not in self._rings_mem:
+            self._rings_mem[rk] = MemoryTickRing(fixture_key, market, window_sec=self.peak_window_sec)
+        return self._rings_mem[rk]
 
     def merge_ticks(
         self,
@@ -58,13 +68,16 @@ class LineCache:
         source: str = "",
         feed_name: str = "",
     ) -> Dict[str, Any]:
-        """Merge incoming ticks, append changes to history, update snapshot."""
         if not incoming:
             return {"appended": 0, "snapshot_count": len(self.get_ticks(fixture_key))}
 
         existing = self.get_ticks(fixture_key)
         snapshot, changed = merge_snapshot(existing, incoming)
-        appended = self._append_history(fixture_key, changed)
+        appended = 0
+        for tick in changed:
+            if tick.market in ("Home", "Draw", "Away", "Over2.5", "BTTS"):
+                self._ring(fixture_key, tick.market).append_tick(tick)
+                appended += 1
 
         meta = {
             "updated_at": time.time(),
@@ -73,6 +86,7 @@ class LineCache:
             "snapshot_count": len(snapshot),
             "history_appended": appended,
             "peak_window_sec": self.peak_window_sec,
+            "history_backend": self.backend,
         }
         payload = [t.to_dict() for t in snapshot]
         if self._redis_ok and self._redis:
@@ -92,27 +106,7 @@ class LineCache:
         return {"appended": appended, "snapshot_count": len(snapshot), "changed": len(changed)}
 
     def put_ticks(self, fixture_key: str, ticks: List[PriceTick], *, source: str = "") -> int:
-        """Backward-compatible replace-style write (prefer merge_ticks in ingest)."""
-        stats = self.merge_ticks(fixture_key, ticks, source=source)
-        return stats["snapshot_count"]
-
-    def _append_history(self, fixture_key: str, ticks: List[PriceTick]) -> int:
-        if not ticks:
-            return 0
-        rows = [t.to_dict() for t in ticks]
-        if self._redis_ok and self._redis:
-            key = self._key_history(fixture_key)
-            pipe = self._redis.pipeline()
-            for row in rows:
-                pipe.rpush(key, json.dumps(row))
-            pipe.ltrim(key, -self.history_max, -1)
-            pipe.expire(key, self.ttl_sec)
-            pipe.execute()
-        else:
-            hist = self._history_mem.setdefault(fixture_key, [])
-            hist.extend(rows)
-            self._history_mem[fixture_key] = hist[-self.history_max :]
-        return len(ticks)
+        return self.merge_ticks(fixture_key, ticks, source=source)["snapshot_count"]
 
     def get_ticks(self, fixture_key: str) -> List[PriceTick]:
         raw = self._get_json(self._key_ticks(fixture_key))
@@ -121,27 +115,36 @@ class LineCache:
         return [PriceTick.from_dict(d) for d in raw if isinstance(d, dict)]
 
     def get_tick_history(self, fixture_key: str, *, since: Optional[float] = None) -> List[PriceTick]:
-        if self._redis_ok and self._redis:
-            key = self._key_history(fixture_key)
-            raw_rows = self._redis.lrange(key, 0, -1) or []
-            rows = [json.loads(r) for r in raw_rows if r]
-        else:
-            rows = self._history_mem.get(fixture_key, [])
-        ticks = [PriceTick.from_dict(d) for d in rows if isinstance(d, dict)]
-        if since is not None:
-            ticks = [t for t in ticks if t.received_at >= since]
-        return ticks
+        """All ticks across market rings within window (or since timestamp)."""
+        now = time.time()
+        since_ts = since if since is not None else now - self.peak_window_sec
+        markets = ("Home", "Draw", "Away", "Over2.5", "BTTS")
+        out: List[PriceTick] = []
+        for m in markets:
+            ring = self._ring(fixture_key, m)
+            out.extend([t for t in ring.ticks_in_window(now=now) if t.received_at >= since_ts])
+        out.sort(key=lambda t: t.received_at)
+        return out
 
     def get_peak_ticks(self, fixture_key: str, window_sec: Optional[float] = None) -> List[PriceTick]:
-        """Best odds per selection inside the lookback window (captures intra-poll spikes)."""
         w = window_sec if window_sec is not None else self.peak_window_sec
-        history = self.get_tick_history(fixture_key)
-        if not history:
-            return self.get_ticks(fixture_key)
-        peaks = peak_ticks_in_window(history, w, now=time.time())
+        now = time.time()
+        markets = ("Home", "Draw", "Away", "Over2.5", "BTTS")
+        peaks: List[PriceTick] = []
+        for m in markets:
+            ring = self._ring(fixture_key, m)
+            if window_sec is not None and window_sec != ring.window_sec:
+                ticks = ring.ticks_in_window(now=now)
+                peaks.extend(peak_ticks_in_window(ticks, w, now=now))
+            else:
+                peaks.extend(ring.peak_ticks(now=now))
         if peaks:
             return peaks
         return self.get_ticks(fixture_key)
+
+    def get_peak_odds(self, fixture_key: str, market: str, selection: str = "") -> float:
+        sel = selection or market
+        return self._ring(fixture_key, market).get_peak_odds(sel)
 
     def get_meta(self, fixture_key: str) -> Dict[str, Any]:
         return self._get_json(self._key_meta(fixture_key)) or {}
