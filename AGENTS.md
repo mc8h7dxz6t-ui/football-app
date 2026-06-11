@@ -56,6 +56,18 @@ Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge 
 
 Streamlit should use `FVE_API_URL=http://localhost:8000` when the ingest layer is running.
 
+### WebSocket line hub + API budgets
+
+| Item | Detail |
+|------|--------|
+| WS endpoint | `ws://localhost:8000/ws/lines/{fixture_key}` — snapshot on connect, `update` on tick change |
+| Cross-process | Worker + API must share `REDIS_URL` (line_bus pub/sub) |
+| Odds API feed | `ENABLE_ODDS_API_FEED=1` only when quota allows; default poll 300s |
+| Shared quotas | `FVE_MATCHBOOK_MAX_CALLS_PER_HOUR`, `FVE_ODDS_API_MAX_CALLS_PER_HOUR` (default **15**), `FVE_API_FOOTBALL_MAX_CALLS_PER_HOUR` |
+| Health | `GET /health` → `api_budgets`, `line_bus` |
+
+Architecture roadmap (Institutional++ vs what we actually need): `docs/ARCHITECTURE.md`.
+
 ### Linting
 
 No linter is configured in this repo. Validation is via `pytest -q`.

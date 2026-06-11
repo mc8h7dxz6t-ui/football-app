@@ -13,6 +13,8 @@ from feeds.registry import FeedRegistry, build_default_registry
 from odds_shopping import shop_lines
 from pipeline.cache import LineCache, get_cache
 from pipeline.circuit_breaker import breakers
+from pipeline.line_bus import get_line_bus
+from pipeline.rate_limits import get_budget
 from pipeline.tick import PriceTick
 
 log = logging.getLogger(__name__)
@@ -64,9 +66,14 @@ def _fetch_feed(
     if not br.allow_call():
         log.warning("circuit open for %s — skipping", feed.name)
         return []
+    budget = get_budget()
+    if not budget.allow(feed.name):
+        log.warning("hourly API budget exhausted for %s — skipping", feed.name)
+        return []
     br.call_started()
     try:
         ticks = feed.fetch_ticks(fixture_key, ctx)
+        budget.record(feed.name)
         br.record_success()
         return ticks
     except Exception as exc:
@@ -94,6 +101,12 @@ def ingest_feed(
             source=feed.name,
             feed_name=feed.name,
         )
+        if merge_stats.get("changed", 0) > 0:
+            try:
+                view = build_line_view(cache, fixture_key)
+                get_line_bus().publish(fixture_key, {"type": "update", **view})
+            except Exception:
+                log.exception("line_bus publish failed for %s", fixture_key)
     return {
         "feed": feed.name,
         "fixture_key": fixture_key,

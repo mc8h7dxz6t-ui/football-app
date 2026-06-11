@@ -59,6 +59,11 @@ def get_odds_api_key() -> str:
 
 
 def _odds_api_get(path: str, params: Dict[str, Any], key: str) -> Any:
+    from pipeline.rate_limits import get_budget
+
+    budget = get_budget()
+    if not budget.allow("odds_api"):
+        return []
     try:
         resp = requests.get(
             f"{ODDS_API_BASE}/{path}",
@@ -66,6 +71,7 @@ def _odds_api_get(path: str, params: Dict[str, Any], key: str) -> Any:
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
+        budget.record("odds_api")
         return resp.json()
     except (requests.RequestException, ValueError):
         return []

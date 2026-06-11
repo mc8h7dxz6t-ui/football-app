@@ -9,6 +9,7 @@ from feeds.api_football_feed import ApiFootballFeed
 from feeds.betfair_feed import BetfairFeed
 from feeds.base import FeedAdapter
 from feeds.matchbook_feed import MatchbookFeed
+from feeds.odds_api_feed import OddsApiFeed
 from feeds.pinnacle_feed import PinnacleFeed
 
 
@@ -32,11 +33,12 @@ class FeedRegistry:
 
 
 def build_default_registry() -> FeedRegistry:
-    return FeedRegistry(
-        [
-            MatchbookFeed(),
-            BetfairFeed(),
-            PinnacleFeed(),
-            ApiFootballFeed(),
-        ]
-    )
+    feeds: List[FeedAdapter] = [
+        MatchbookFeed(),
+        BetfairFeed(),
+        PinnacleFeed(),
+        ApiFootballFeed(),
+    ]
+    if os.environ.get("ENABLE_ODDS_API_FEED", "").strip().lower() in ("1", "true", "yes", "on"):
+        feeds.append(OddsApiFeed())
+    return FeedRegistry(feeds)

@@ -56,9 +56,26 @@ Matchbook / API-Football feeds
         → async worker (250ms scheduler) → Redis ZSET tick rings
         → Shin de-vig sharp synthetic line
         → Postgres snapshots (optional)
-        → FastAPI /ingest /lines /value-scan
+        → FastAPI /ingest /lines /value-scan /ws/lines/{fixture}
         → Streamlit / React frontend
 ```
+
+**WebSocket (no book API polling from UI):**
+
+```bash
+# ws://localhost:8000/ws/lines/Arsenal%20v%20Chelsea
+# Send "ping" or "snapshot" as text; receive snapshot | update | pong
+```
+
+**Protect shared API keys** (Matchbook + Odds API used across repos):
+
+```bash
+export FVE_ODDS_API_MAX_CALLS_PER_HOUR=15      # conservative default
+export FVE_MATCHBOOK_MAX_CALLS_PER_HOUR=1200
+export ENABLE_ODDS_API_FEED=0                  # keep Odds API feed off unless needed
+```
+
+See `docs/ARCHITECTURE.md` for Institutional++ upgrade path vs current Python stack.
 
 **Sharp benchmark:** picks where your Poisson model shows edge but the **de-vigged
 exchange/sharp line** disagrees are flagged as likely hallucinations and filtered out.

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
 from engine.devig import devig_1x2, overround
@@ -15,11 +16,22 @@ from pipeline.cache import get_cache
 from pipeline.circuit_breaker import breakers
 from pipeline.ingest import ingest_fixture
 from feeds.registry import build_default_registry
+from api.ws_hub import get_ws_hub
+from pipeline.line_bus import get_line_bus
+from pipeline.rate_limits import get_budget
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    get_ws_hub().ensure_started()
+    yield
+
 
 app = FastAPI(
     title="Football Value Engine API",
     version="2.0.0",
     description="Decoupled ingest + cache + sharp benchmark (inst++ pipeline)",
+    lifespan=lifespan,
 )
 
 
@@ -52,9 +64,17 @@ def health() -> Dict[str, Any]:
     return {
         "status": "ok",
         "cache_backend": cache.backend,
+        "line_bus": get_line_bus().backend,
+        "api_budgets": get_budget().status(),
         "breakers": breakers.all_status(),
         "execution": risk.status(),
     }
+
+
+@app.websocket("/ws/lines/{fixture_key}")
+async def ws_lines(fixture_key: str, websocket: WebSocket) -> None:
+    """Push line snapshots/updates — clients subscribe instead of polling book APIs."""
+    await get_ws_hub().run_session(fixture_key, websocket)
 
 
 @app.get("/lines/{fixture_key}")
