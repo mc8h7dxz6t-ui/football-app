@@ -46,7 +46,8 @@ export MATCHBOOK_PASSWORD="..."
 export REDIS_URL="redis://localhost:6379/0"
 
 uvicorn api.main:app --port 8000
-python worker.py --fixtures "Arsenal v Chelsea:12345:67890" --interval 5
+python worker.py --fixtures "Arsenal v Chelsea:12345:67890"
+# tiered polls: Matchbook ~1s, API-Football ~5s (override: FEED_POLL_SEC_MATCHBOOK=0.5)
 streamlit run app.py   # enable "Use FastAPI ingest layer" in sidebar
 ```
 

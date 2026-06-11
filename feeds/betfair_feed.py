@@ -16,6 +16,7 @@ from pipeline.tick import PriceTick
 class BetfairFeed(FeedAdapter):
     name = "betfair"
     enabled_by_default = bool(os.environ.get("BETFAIR_APP_KEY"))
+    tier = "exchange"
 
     def fetch_ticks(self, fixture_key: str, context: Dict[str, Any]) -> List[PriceTick]:
         # Phase 2: Betfair Stream API (SSL) or listMarketBook REST poll

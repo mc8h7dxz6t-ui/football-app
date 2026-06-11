@@ -14,8 +14,8 @@ def test_tick_dedupe_key_stable():
 def test_memory_cache_roundtrip():
     cache = LineCache(redis_url="redis://127.0.0.1:59999/0", ttl_sec=30)
     ticks = [PriceTick("x v y", "Home", "Home", 2.0, "MB", "matchbook", category="exchange")]
-    n = cache.put_ticks("x v y", ticks)
-    assert n == 1
+    n = cache.merge_ticks("x v y", ticks, feed_name="test")
+    assert n["snapshot_count"] == 1
     got = cache.get_ticks("x v y")
     assert len(got) == 1
     assert got[0].odds == 2.0

@@ -19,6 +19,7 @@ TIMEOUT = 15
 class ApiFootballFeed(FeedAdapter):
     name = "api-football"
     enabled_by_default = True
+    tier = "soft"
 
     def _key(self) -> str:
         return (os.environ.get("API_SPORTS_KEY") or os.environ.get("API_FOOTBALL_KEY") or "").strip()

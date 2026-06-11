@@ -54,19 +54,38 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/lines/{fixture_key}")
-def get_lines(fixture_key: str) -> Dict[str, Any]:
-    ticks = get_cache().get_ticks(fixture_key)
-    if not ticks:
+def get_lines(fixture_key: str, peak: bool = True) -> Dict[str, Any]:
+    cache = get_cache()
+    if not cache.get_ticks(fixture_key):
         raise HTTPException(404, "No cached lines — POST /ingest first")
-    from pipeline.ingest import ticks_to_shopped, build_fixture_1x2_sharp_line
+    from pipeline.ingest import build_line_view
 
-    shopped = ticks_to_shopped(ticks)
+    view = build_line_view(cache, fixture_key)
+    if not peak:
+        from pipeline.ingest import ticks_to_shopped, build_fixture_1x2_sharp_line
+
+        ticks = cache.get_ticks(fixture_key)
+        shopped = ticks_to_shopped(ticks)
+        view["shopped"] = shopped
+        view["sharp_fair_probs"] = build_fixture_1x2_sharp_line(shopped)
+        view["use_peak_window"] = False
+    return view
+
+
+@app.get("/lines/{fixture_key}/history")
+def get_line_history(fixture_key: str, since_sec: float = 30.0) -> Dict[str, Any]:
+    cache = get_cache()
+    import time
+
+    since = time.time() - since_sec
+    history = cache.get_tick_history(fixture_key, since=since)
+    if not history and not cache.get_ticks(fixture_key):
+        raise HTTPException(404, "No history for fixture")
     return {
         "fixture_key": fixture_key,
-        "tick_count": len(ticks),
-        "shopped": shopped,
-        "sharp_fair_probs": build_fixture_1x2_sharp_line(shopped),
-        "meta": get_cache().get_meta(fixture_key),
+        "since_sec": since_sec,
+        "tick_count": len(history),
+        "ticks": [t.to_dict() for t in history[-500:]],
     }
 
 
@@ -85,14 +104,14 @@ def ingest(req: IngestRequest) -> Dict[str, Any]:
 
 @app.post("/value-scan")
 def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
-    ticks = get_cache().get_ticks(req.fixture_key)
-    if not ticks:
+    cache = get_cache()
+    from pipeline.ingest import build_line_view
+
+    view = build_line_view(cache, req.fixture_key)
+    if not view.get("tick_count"):
         raise HTTPException(404, "No cached lines for fixture")
-
-    from pipeline.ingest import ticks_to_shopped, build_fixture_1x2_sharp_line
-
-    shopped = ticks_to_shopped(ticks)
-    sharp_fair = build_fixture_1x2_sharp_line(shopped)
+    shopped = view["shopped"]
+    sharp_fair = view.get("sharp_fair_probs")
     probs = {
         **match_model(req.home_stats, req.away_stats, use_xg=req.use_xg),
         **goal_model(req.home_stats, req.away_stats, use_xg=req.use_xg),

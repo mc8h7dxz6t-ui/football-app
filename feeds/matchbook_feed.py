@@ -97,6 +97,7 @@ def _map_runner_to_1x2(runner_name: str, home: str, away: str) -> Optional[str]:
 class MatchbookFeed(FeedAdapter):
     name = "matchbook"
     enabled_by_default = True
+    tier = "exchange"
 
     def fetch_ticks(self, fixture_key: str, context: Dict[str, Any]) -> List[PriceTick]:
         client = _client_singleton()

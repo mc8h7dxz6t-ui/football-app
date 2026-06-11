@@ -46,7 +46,9 @@ Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge 
 |-----------|----------------|
 | Pro deps | `pip install -r requirements-pro.txt` |
 | API | `uvicorn api.main:app --port 8000` |
-| Ingest worker | `python worker.py --fixtures 'key:id:matchbook_id' --interval 5` |
+| Ingest worker | `python worker.py --fixtures 'key:id:matchbook_id'` (tiered: exchange 1s, soft 5s) |
+| Exchange poll override | `FEED_POLL_SEC_MATCHBOOK=0.5` |
+| Intra-window peaks | `PEAK_ODDS_WINDOW_SEC=5` — shop best odds seen in window |
 | Celery (optional) | `celery -A tasks.celery_app worker -B` |
 | Redis | `docker compose up -d redis` — set `REDIS_URL` |
 | Matchbook | `MATCHBOOK_USERNAME` + `MATCHBOOK_PASSWORD` |
