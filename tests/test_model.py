@@ -59,9 +59,9 @@ def test_extract_best_takes_max_across_books():
         "response": [
             {
                 "bookmakers": [
-                    {"bets": [{"name": "Match Winner", "values": [
+                    {"name": "SoftBook", "bets": [{"name": "Match Winner", "values": [
                         {"value": "Home", "odd": "2.0"}, {"value": "Away", "odd": "3.5"}]}]},
-                    {"bets": [{"name": "Match Winner", "values": [
+                    {"name": "OtherBook", "bets": [{"name": "Match Winner", "values": [
                         {"value": "Home", "odd": "2.2"}]},
                               {"name": "Both Teams Score", "values": [{"value": "Yes", "odd": "1.8"}]}]},
                 ]
@@ -70,6 +70,7 @@ def test_extract_best_takes_max_across_books():
     }
     best = model.extract_best(odds)
     assert best["Home"]["odds"] == 2.2   # best of 2.0 / 2.2
+    assert best["Home"]["bookmaker"] == "OtherBook"
     assert best["Away"]["odds"] == 3.5
     assert best["BTTS"]["odds"] == 1.8
 

@@ -17,6 +17,7 @@ environment variable **or** Streamlit secrets — it is never hard-coded:
 
 ```bash
 export API_SPORTS_KEY="your_key_here"
+export ODDS_API_KEY="your_key_here"   # optional — extra books + racing shop
 ```
 
 or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitignored) and fill it in.
@@ -32,7 +33,9 @@ streamlit run app.py
 ```
 
 - **Value Scan** — set bankroll / min edge % / Kelly fraction (sidebar), pick leagues and
-  season, choose days ahead, then **Run Scan**. Results are sorted by edge.
+  season, choose days ahead, then **Run Scan**. Results show **bookmaker**, **exchange vs
+  soft prices**, **bet links**, and edge sorted by your chosen shopping channel.
+- **Racing Shop** — win-market line shop (UK / US / AU) when `ODDS_API_KEY` is set.
 - **Backtest** — replays recent finished fixtures, settles them against real scores, and
   reports **Brier score, log loss, top-pick accuracy** and a **calibration table**.
 
@@ -46,7 +49,9 @@ can't contradict each other:
   are present it blends xG with actual goals (`XG_BLEND_ALPHA`, default 0.6) — xG is more
   stable/predictive than raw goals. Toggle "Blend xG" in the sidebar (`use_xg`).
 - **match_model / goal_model** — 1X2, Over 2.5 and BTTS from the same Poisson score grid.
-- **extract_best** — best decimal odds per market across bookmakers (line shopping).
+- **Line shopping** (`odds_shopping.py`) — best price per market with **bookmaker name**,
+  **exchange vs soft vs sharp** channels, **place-bet links**, and optional merge with
+  **The Odds API** for broader football + **horse racing** coverage.
 - **edge / kelly** — expected value % and fractional-Kelly stake.
 
 API responses are cached (`st.cache_data`) to respect free-tier rate limits, and every

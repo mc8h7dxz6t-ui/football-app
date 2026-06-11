@@ -7,13 +7,13 @@ import requests
 import streamlit as st
 
 import backtest as bt
-from model import (
-    edge,
-    extract_best,
-    goal_model,
-    kelly,
-    match_model,
-    parse_standings,
+from model import edge, goal_model, kelly, match_model, parse_standings
+from odds_shopping import pick_channel_quote, shop_lines, shop_racing_winners
+from odds_sources import (
+    ODDS_API_RACING_SPORTS,
+    football_offers_for_fixture,
+    get_odds_api_key,
+    racing_offers,
 )
 from xg_sources import attach_xg
 
@@ -134,8 +134,27 @@ with st.sidebar:
     selected_leagues = st.multiselect(
         "Leagues", options=list(LEAGUES.keys()), default=list(LEAGUES.keys())
     )
+    st.subheader("Line shopping")
+    shop_channel = st.radio(
+        "Price for edge / Kelly",
+        options=["all", "exchange", "soft", "sharp"],
+        format_func=lambda x: {
+            "all": "Best overall",
+            "exchange": "Best exchange",
+            "soft": "Best soft book",
+            "sharp": "Best sharp book",
+        }[x],
+        horizontal=True,
+    )
+    merge_odds_api = st.checkbox(
+        "Merge The Odds API (broader book coverage)",
+        value=bool(get_odds_api_key()),
+        help="Set ODDS_API_KEY for extra football + racing books beyond API-Football.",
+    )
+    if merge_odds_api and not get_odds_api_key():
+        st.caption("⚠️ ODDS_API_KEY not set — only API-Football books will be used.")
 
-scan_tab, backtest_tab = st.tabs(["Value Scan", "Backtest"])
+scan_tab, backtest_tab, racing_tab = st.tabs(["Value Scan", "Backtest", "Racing Shop"])
 
 # ---------------------- Value Scan ----------------------
 with scan_tab:
@@ -151,30 +170,66 @@ with scan_tab:
         for idx, league_name in enumerate(selected_leagues):
             league_id = LEAGUES[league_name]
             standings = standings_with_xg(league_id, int(season), use_xg)
+            odds_api_events = None
+            if merge_odds_api and get_odds_api_key():
+                from odds_sources import fetch_odds_api_football
+
+                odds_api_events = fetch_odds_api_football(league_name, get_odds_api_key())
             for i in range(int(days_ahead)):
                 date = (datetime.now(timezone.utc) + timedelta(days=i)).strftime("%Y-%m-%d")
+
                 for f in get_fixtures(league_id, date).get("response", []):
                     try:
                         fixture_id = f["fixture"]["id"]
                         home_id = f["teams"]["home"]["id"]
                         away_id = f["teams"]["away"]["id"]
+                        home_name = f["teams"]["home"]["name"]
+                        away_name = f["teams"]["away"]["name"]
+                        fixture_label = f"{home_name} v {away_name}"
                         kickoff = f["fixture"]["date"].replace("T", " ").replace("Z", "")
                     except (KeyError, TypeError):
                         continue
                     if home_id not in standings or away_id not in standings:
                         continue
-                    best = extract_best(get_odds(fixture_id))
+                    offers = football_offers_for_fixture(
+                        get_odds(fixture_id),
+                        event_label=fixture_label,
+                        league_name=league_name if merge_odds_api else "",
+                        odds_api_events=odds_api_events if merge_odds_api else None,
+                    )
+                    shopped = shop_lines(offers)
                     home, away = standings[home_id], standings[away_id]
                     probs = {**match_model(home, away, use_xg=use_xg), **goal_model(home, away, use_xg=use_xg)}
                     for sel, prob in probs.items():
-                        odds = best[sel]["odds"]
+                        quote = pick_channel_quote(shopped, sel, shop_channel)
+                        odds = float(quote.get("odds") or 0)
                         if odds <= 1.0:
                             continue
                         e = edge(prob, odds)
                         if e < min_edge:
                             continue
                         stake = bankroll * kelly(prob, odds) * kelly_frac
-                        results.append([league_name, sel, odds, prob, e, stake, kickoff])
+                        exch = shopped[sel]["exchange"]
+                        soft = shopped[sel]["soft"]
+                        results.append(
+                            [
+                                league_name,
+                                fixture_label,
+                                sel,
+                                odds,
+                                quote.get("bookmaker", ""),
+                                quote.get("category", ""),
+                                quote.get("bet_url", ""),
+                                exch.get("odds") or None,
+                                exch.get("bookmaker", ""),
+                                soft.get("odds") or None,
+                                soft.get("bookmaker", ""),
+                                prob,
+                                e,
+                                stake,
+                                kickoff,
+                            ]
+                        )
             progress.progress((idx + 1) / len(selected_leagues), text=f"Scanned {league_name}")
         progress.empty()
 
@@ -183,9 +238,34 @@ with scan_tab:
         else:
             df = pd.DataFrame(
                 results,
-                columns=["League", "Market", "Odds", "Model Prob", "Edge %", "Stake £", "Kickoff"],
+                columns=[
+                    "League",
+                    "Fixture",
+                    "Market",
+                    "Odds",
+                    "Bookmaker",
+                    "Channel",
+                    "Bet URL",
+                    "Exch Odds",
+                    "Exch Book",
+                    "Soft Odds",
+                    "Soft Book",
+                    "Model Prob",
+                    "Edge %",
+                    "Stake £",
+                    "Kickoff",
+                ],
             )
-            st.dataframe(df.sort_values(by="Edge %", ascending=False), use_container_width=True)
+            df = df.sort_values(by="Edge %", ascending=False)
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "Bet URL": st.column_config.LinkColumn("Place bet", display_text="Open"),
+                    "Exch Odds": st.column_config.NumberColumn(format="%.2f"),
+                    "Soft Odds": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
 
 # ---------------------- Backtest ----------------------
 with backtest_tab:
@@ -230,6 +310,8 @@ with backtest_tab:
                     outcome = bt.settle_1x2(hg, ag)
                     rec = {"probs": probs, "outcome": outcome}
                     if include_market:
+                        from odds_shopping import extract_best
+
                         best = extract_best(get_odds(fid))
                         market = bt.implied_probs_1x2(best["Home"]["odds"], best["Draw"]["odds"], best["Away"]["odds"])
                         if market:
@@ -274,5 +356,40 @@ with backtest_tab:
                     r3.metric("ROI", f"{roi['roi_pct']}%", help=f"P&L {roi['pnl_units']} units")
                 else:
                     st.info("No value bets cleared the edge threshold in the window.")
+
+# ---------------------- Racing Shop ----------------------
+with racing_tab:
+    st.caption(
+        "Horse-racing **win** line shop via **The Odds API** (UK / US / AU). "
+        "Shows best overall, exchange, and soft-book prices per runner with bet links. "
+        "No racing model yet — odds comparison only."
+    )
+    if not get_odds_api_key():
+        st.warning(
+            "Set `ODDS_API_KEY` (or `THE_ODDS_API_KEY`) to load racing markets. "
+            "Get a key at the-odds-api.com.",
+            icon="🐎",
+        )
+    else:
+        region_labels = [r[0] for r in ODDS_API_RACING_SPORTS]
+        region_map = {r[0]: r[1] for r in ODDS_API_RACING_SPORTS}
+        racing_region = st.selectbox("Racing region", region_labels, index=0)
+        if st.button("Shop racing odds", key="racing"):
+            with st.spinner("Fetching racing markets…"):
+                offers = racing_offers(region_map[racing_region])
+                rows = shop_racing_winners(offers)
+            if not rows:
+                st.info("No racing win markets returned for this region right now.")
+            else:
+                rdf = pd.DataFrame(rows)
+                st.dataframe(
+                    rdf,
+                    use_container_width=True,
+                    column_config={
+                        "best_url": st.column_config.LinkColumn("Best bet", display_text="Open"),
+                        "exchange_url": st.column_config.LinkColumn("Exchange", display_text="Open"),
+                        "soft_url": st.column_config.LinkColumn("Soft book", display_text="Open"),
+                    },
+                )
 
 st.caption("Analytical/research tool only. Betting carries financial risk; validate before staking real money.")

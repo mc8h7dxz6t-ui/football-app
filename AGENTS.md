@@ -36,7 +36,9 @@ pip install -r requirements-xg.txt    # optional Understat xG (heavy)
 
 ### API key
 
-Live fixture/odds data needs a free [API-Football](https://www.api-football.com) key. Without it, Streamlit shows an error and stops before the Value Scan / Backtest tabs. Copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` to configure locally.
+Live fixture/odds data needs a free [API-Football](https://www.api-football.com) key. Optional [The Odds API](https://the-odds-api.com) key (`ODDS_API_KEY`) widens book coverage and powers the **Racing Shop** tab. Copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` to configure locally.
+
+Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge in `odds_sources.py`.
 
 ### Linting
 
