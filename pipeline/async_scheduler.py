@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from feeds.base import FeedAdapter
 from feeds.registry import FeedRegistry, build_default_registry
-from pipeline.ingest import SCHEDULER_TICK_SEC, ingest_feed
+from pipeline.ingest import SCHEDULER_TICK_SEC, ingest_feed, refresh_sports_context
 
 log = logging.getLogger(__name__)
+
+SPORTS_REFRESH_SEC = float(os.environ.get("SPORTS_REFRESH_SEC", "300"))
 
 
 class AsyncSchedulerGuard:
@@ -73,11 +76,18 @@ class AsyncTieredScheduler:
         self.tick_sec = tick_sec
         self.guard = guard or AsyncSchedulerGuard()
         self._next_run: Dict[tuple[str, str], float] = {}
+        self._next_sports: Dict[str, float] = {}
         self._cycles = 0
 
     async def _poll_feed(self, feed: FeedAdapter, fixture_key: str, ctx: Dict[str, Any]) -> None:
         tid = task_id_for_feed(feed.name, fixture_key)
         await self.guard.execute_safely(tid, ingest_feed, feed, fixture_key, context=ctx)
+
+    async def _poll_sports(self, fixture_key: str, ctx: Dict[str, Any]) -> None:
+        if not ctx.get("fixture_id"):
+            return
+        tid = f"sports:{fixture_key}"
+        await self.guard.execute_safely(tid, refresh_sports_context, fixture_key, ctx)
 
     async def start_loop(self, max_cycles: Optional[int] = None) -> None:
         intervals = {f.name: f.poll_interval_sec for f in self.feeds}
@@ -92,6 +102,9 @@ class AsyncTieredScheduler:
             scheduled = False
             for fk in self.fixture_keys:
                 ctx = self.contexts.get(fk, {})
+                if ctx.get("fixture_id") and now >= self._next_sports.get(fk, 0.0):
+                    asyncio.create_task(self._poll_sports(fk, ctx))
+                    self._next_sports[fk] = now + SPORTS_REFRESH_SEC
                 for feed in self.feeds:
                     run_key = (fk, feed.name)
                     if now < self._next_run.get(run_key, 0.0):

@@ -15,6 +15,7 @@ from pipeline.cache import LineCache, get_cache
 from pipeline.circuit_breaker import breakers
 from pipeline.line_bus import get_line_bus
 from pipeline.rate_limits import get_budget
+from pipeline.sports_context import fetch_sports_context, sports_refresh_due
 from pipeline.tick import PriceTick
 
 log = logging.getLogger(__name__)
@@ -103,8 +104,8 @@ def ingest_feed(
         )
         if merge_stats.get("changed", 0) > 0:
             try:
-                view = build_line_view(cache, fixture_key)
-                get_line_bus().publish(fixture_key, {"type": "update", **view})
+                bundle = build_fixture_bundle(cache, fixture_key)
+                get_line_bus().publish(fixture_key, {"type": "line_update", **bundle})
             except Exception:
                 log.exception("line_bus publish failed for %s", fixture_key)
     return {
@@ -138,6 +139,61 @@ def build_line_view(cache: LineCache, fixture_key: str) -> Dict[str, Any]:
     }
 
 
+def build_fixture_bundle(cache: LineCache, fixture_key: str) -> Dict[str, Any]:
+    """Lines + sports context — single payload for WebSocket clients and traders."""
+    lines = build_line_view(cache, fixture_key)
+    sports = cache.get_sports(fixture_key)
+    bundle: Dict[str, Any] = {
+        "fixture_key": fixture_key,
+        "lines": lines,
+        "sports": sports,
+        "ready": {
+            "lines": bool(lines.get("tick_count")),
+            "sports": bool(sports and sports.get("data_quality", {}).get("home_ok")),
+        },
+    }
+    if sports and sports.get("model_probs"):
+        bundle["model_probs"] = sports["model_probs"]
+    return bundle
+
+
+def refresh_sports_context(
+    fixture_key: str,
+    context: Dict[str, Any],
+    *,
+    cache: Optional[LineCache] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Fetch/cache standings + form stats (slower cadence than odds lines)."""
+    cache = cache or get_cache()
+    cached = cache.get_sports(fixture_key)
+    if not force and cached and not sports_refresh_due(cached):
+        return {"fixture_key": fixture_key, "cached": True, "sports": cached}
+
+    budget = get_budget()
+    if not budget.allow("api-football"):
+        log.warning("sports API budget exhausted — serving stale if present")
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached}
+        return {"fixture_key": fixture_key, "error": "sports budget exhausted"}
+
+    try:
+        sports = fetch_sports_context(context)
+        budget.record("api-football", n=2)
+        cache.put_sports(fixture_key, sports)
+        bundle = build_fixture_bundle(cache, fixture_key)
+        get_line_bus().publish(
+            fixture_key,
+            {"type": "sports_update", **bundle},
+        )
+        return {"fixture_key": fixture_key, "cached": False, "sports": sports}
+    except Exception as exc:
+        log.exception("sports refresh failed for %s: %s", fixture_key, exc)
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached, "error": str(exc)}
+        return {"fixture_key": fixture_key, "error": str(exc)}
+
+
 def ingest_fixture(
     registry: FeedRegistry,
     fixture_key: str,
@@ -162,8 +218,10 @@ def ingest_fixture(
             any_fetched = True
 
     stale = not any_fetched and bool(cache.get_ticks(fixture_key))
+    if ctx.get("fixture_id"):
+        refresh_sports_context(fixture_key, ctx, cache=cache)
     view = build_line_view(cache, fixture_key)
-    result = {**view, "stale": stale, "feed_results": feed_results}
+    result = {**build_fixture_bundle(cache, fixture_key), "stale": stale, "feed_results": feed_results}
 
     try:
         from db.store import persist_snapshot

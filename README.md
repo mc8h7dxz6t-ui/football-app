@@ -73,15 +73,34 @@ Matchbook / API-Football feeds
         → async worker (250ms scheduler) → Redis ZSET tick rings
         → Shin de-vig sharp synthetic line
         → Postgres snapshots (optional)
-        → FastAPI /ingest /lines /value-scan /ws/lines/{fixture}
+        → FastAPI /ingest /lines /fixture /value-scan /ws/fixture/{fixture}
         → Streamlit / React frontend
 ```
 
-**WebSocket (no book API polling from UI):**
+**WebSocket (lines + sports — no book API polling from trader/UI):**
 
 ```bash
-# ws://localhost:8000/ws/lines/Arsenal%20v%20Chelsea
-# Send "ping" or "snapshot" as text; receive snapshot | update | pong
+# ws://localhost:8000/ws/fixture/Arsenal%20v%20Chelsea
+# (alias: /ws/lines/{fixture_key})
+```
+
+Message types:
+
+| type | contents |
+|------|----------|
+| `snapshot` | `{ lines, sports, model_probs, ready }` on connect |
+| `line_update` | odds/shopped/sharp_fair changed |
+| `sports_update` | standings/form/xG refreshed (~5 min) |
+| `pong` | reply to client `ping` |
+
+Client text commands: `ping`, `snapshot`, `refresh_sports`
+
+`sports` block includes `home_stats`, `away_stats`, `kickoff_iso`, `model_probs` — enough for value scan without separate API calls.
+
+```bash
+export SPORTS_REFRESH_SEC=300    # worker sports poll (default 5 min)
+export SPORTS_CACHE_TTL_SEC=3600
+export FVE_USE_XG=1
 ```
 
 **Protect shared API keys** (Matchbook + Odds API used across repos):

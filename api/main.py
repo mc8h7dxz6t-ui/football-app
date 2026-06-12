@@ -14,7 +14,7 @@ from engine.fair_value import benchmark_vs_sharp
 from model import edge, goal_model, kelly, match_model
 from pipeline.cache import get_cache
 from pipeline.circuit_breaker import breakers
-from pipeline.ingest import ingest_fixture
+from pipeline.ingest import ingest_fixture, build_fixture_bundle, build_line_view, refresh_sports_context
 from feeds.registry import build_default_registry
 from api.ws_hub import get_ws_hub
 from pipeline.line_bus import get_line_bus
@@ -46,8 +46,8 @@ class IngestRequest(BaseModel):
 
 class ValueScanRequest(BaseModel):
     fixture_key: str
-    home_stats: Dict[str, Any]
-    away_stats: Dict[str, Any]
+    home_stats: Dict[str, Any] = Field(default_factory=dict)
+    away_stats: Dict[str, Any] = Field(default_factory=dict)
     min_edge_pct: float = 2.5
     bankroll: float = 1000.0
     kelly_fraction: float = 0.25
@@ -73,8 +73,32 @@ def health() -> Dict[str, Any]:
 
 @app.websocket("/ws/lines/{fixture_key}")
 async def ws_lines(fixture_key: str, websocket: WebSocket) -> None:
-    """Push line snapshots/updates — clients subscribe instead of polling book APIs."""
+    """Push line + sports bundle — clients subscribe instead of polling book APIs."""
     await get_ws_hub().run_session(fixture_key, websocket)
+
+
+@app.websocket("/ws/fixture/{fixture_key}")
+async def ws_fixture(fixture_key: str, websocket: WebSocket) -> None:
+    """Alias for /ws/lines — full fixture bundle (odds lines + sports context)."""
+    await get_ws_hub().run_session(fixture_key, websocket)
+
+
+@app.get("/fixture/{fixture_key}")
+def get_fixture_bundle(fixture_key: str) -> Dict[str, Any]:
+    cache = get_cache()
+    bundle = build_fixture_bundle(cache, fixture_key)
+    if not bundle.get("ready", {}).get("lines") and not bundle.get("ready", {}).get("sports"):
+        raise HTTPException(404, "No cached fixture data — POST /ingest first")
+    return bundle
+
+
+@app.get("/sports/{fixture_key}")
+def get_sports(fixture_key: str) -> Dict[str, Any]:
+    cache = get_cache()
+    sports = cache.get_sports(fixture_key)
+    if not sports:
+        raise HTTPException(404, "No sports context — POST /ingest with fixture_id")
+    return sports
 
 
 @app.get("/lines/{fixture_key}")
@@ -136,9 +160,20 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         raise HTTPException(404, "No cached lines for fixture")
     shopped = view["shopped"]
     sharp_fair = view.get("sharp_fair_probs")
+
+    home_stats = dict(req.home_stats)
+    away_stats = dict(req.away_stats)
+    if not home_stats or not away_stats:
+        sports = cache.get_sports(req.fixture_key)
+        if sports:
+            home_stats = home_stats or dict(sports.get("home_stats") or {})
+            away_stats = away_stats or dict(sports.get("away_stats") or {})
+    if not home_stats or not away_stats:
+        raise HTTPException(404, "No team stats — ingest with fixture_id or pass home_stats/away_stats")
+
     probs = {
-        **match_model(req.home_stats, req.away_stats, use_xg=req.use_xg),
-        **goal_model(req.home_stats, req.away_stats, use_xg=req.use_xg),
+        **match_model(home_stats, away_stats, use_xg=req.use_xg),
+        **goal_model(home_stats, away_stats, use_xg=req.use_xg),
     }
 
     picks: List[Dict[str, Any]] = []

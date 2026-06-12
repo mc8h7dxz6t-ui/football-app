@@ -12,7 +12,7 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from pipeline.cache import get_cache
-from pipeline.ingest import build_line_view
+from pipeline.ingest import build_fixture_bundle, build_line_view, refresh_sports_context
 from pipeline.line_bus import get_line_bus
 
 log = logging.getLogger(__name__)
@@ -47,15 +47,16 @@ class WsLineHub:
             self._rooms[fixture_key].add(websocket)
 
         cache = get_cache()
-        if cache.get_ticks(fixture_key):
-            view = build_line_view(cache, fixture_key)
-            await websocket.send_json({"type": "snapshot", **view})
+        bundle = build_fixture_bundle(cache, fixture_key)
+        if bundle.get("ready", {}).get("lines") or bundle.get("ready", {}).get("sports"):
+            await websocket.send_json({"type": "snapshot", **bundle})
         else:
             await websocket.send_json(
                 {
                     "type": "waiting",
                     "fixture_key": fixture_key,
-                    "message": "No cached lines yet — start worker.py ingest for this fixture.",
+                    "message": "No cached data yet — start worker.py ingest for this fixture.",
+                    "ready": bundle.get("ready", {}),
                 }
             )
 
@@ -85,11 +86,21 @@ class WsLineHub:
                 msg = await websocket.receive_text()
                 if msg.strip().lower() == "ping":
                     await websocket.send_json({"type": "pong"})
-                elif msg.strip().lower() == "snapshot":
+                elif msg.strip().lower() in ("snapshot", "bundle"):
                     cache = get_cache()
-                    if cache.get_ticks(fixture_key):
-                        view = build_line_view(cache, fixture_key)
-                        await websocket.send_json({"type": "snapshot", **view})
+                    bundle = build_fixture_bundle(cache, fixture_key)
+                    await websocket.send_json({"type": "snapshot", **bundle})
+                elif msg.strip().lower() == "refresh_sports":
+                    cache = get_cache()
+                    sports = cache.get_sports(fixture_key) or {}
+                    refresh_sports_context(
+                        fixture_key,
+                        {"fixture_id": sports.get("fixture_id")},
+                        cache=cache,
+                        force=True,
+                    )
+                    bundle = build_fixture_bundle(get_cache(), fixture_key)
+                    await websocket.send_json({"type": "sports_update", **bundle})
         except WebSocketDisconnect:
             pass
         finally:

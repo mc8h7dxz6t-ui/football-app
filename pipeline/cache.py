@@ -46,6 +46,9 @@ class LineCache:
     def _key_meta(self, fixture_key: str) -> str:
         return f"fve:meta:{fixture_key}"
 
+    def _key_sports(self, fixture_key: str) -> str:
+        return f"fve:sports:{fixture_key}"
+
     def _ring(self, fixture_key: str, market: str) -> TickRing:
         rk = f"{fixture_key}:{market}"
         if self._redis_ok and self._redis:
@@ -148,6 +151,20 @@ class LineCache:
 
     def get_meta(self, fixture_key: str) -> Dict[str, Any]:
         return self._get_json(self._key_meta(fixture_key)) or {}
+
+    def put_sports(self, fixture_key: str, sports: Dict[str, Any], *, ttl_sec: Optional[int] = None) -> None:
+        ttl = int(ttl_sec or sports.get("ttl_sec") or int(os.environ.get("SPORTS_CACHE_TTL_SEC", "3600")))
+        if self._redis_ok and self._redis:
+            self._redis.setex(self._key_sports(fixture_key), ttl, json.dumps(sports, default=str))
+        else:
+            self._memory[self._key_sports(fixture_key)] = {
+                "data": sports,
+                "expires": time.time() + ttl,
+            }
+
+    def get_sports(self, fixture_key: str) -> Optional[Dict[str, Any]]:
+        data = self._get_json(self._key_sports(fixture_key))
+        return data if isinstance(data, dict) else None
 
     def _get_json(self, key: str) -> Any:
         if self._redis_ok and self._redis:
