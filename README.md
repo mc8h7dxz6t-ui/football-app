@@ -32,23 +32,37 @@ or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitigno
 streamlit run app.py
 ```
 
-### Inst++ pipeline (decoupled ingest)
+### Inst++ pipeline (hands-off)
 
-The UI should **not** call book APIs directly in production. Use the FastAPI + worker stack:
+One command starts Redis, API, **auto watchlist worker**, and Streamlit:
+
+```bash
+cp .env.example .env    # set API_SPORTS_KEY (required)
+bash scripts/run_stack.sh
+```
+
+Open http://localhost:8501 → sidebar **Use FastAPI ingest layer**. The worker discovers
+upcoming fixtures from API-Football every hour (`FVE_WATCHLIST_DAYS=3` by default).
+
+**Matchbook exchange lines:** copy `config/matchbook_map.json.example` → `config/matchbook_map.json`
+and add `Home v Away` → event id keys.
+
+**Daily corruption check:**
+
+```bash
+bash scripts/preflight_fve.sh
+bash scripts/install_cron_fve.sh   # optional 06:15 UTC cron
+```
+
+Manual / dev mode:
 
 ```bash
 pip install -r requirements-pro.txt
-docker compose up -d redis postgres   # optional but recommended
-
-export API_SPORTS_KEY="..."
-export MATCHBOOK_USERNAME="..."       # your Matchbook API access
-export MATCHBOOK_PASSWORD="..."
-export REDIS_URL="redis://localhost:6379/0"
-
+docker compose up -d redis
 uvicorn api.main:app --port 8000
-python worker.py --fixtures "Arsenal v Chelsea:12345:67890"
-# tiered polls: Matchbook ~1s, API-Football ~5s (override: FEED_POLL_SEC_MATCHBOOK=0.5)
-streamlit run app.py   # enable "Use FastAPI ingest layer" in sidebar
+python worker.py --auto
+# or: python worker.py --fixtures "Arsenal v Chelsea:12345:67890"
+streamlit run app.py
 ```
 
 ```

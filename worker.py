@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from pipeline.ingest import run_ingest_loop
@@ -32,32 +33,18 @@ from pipeline.ingest import run_ingest_loop
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-def _parse_fixtures(spec: str):
-    keys = []
-    contexts = {}
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        bits = part.split(":")
-        fk = bits[0]
-        keys.append(fk)
-        ctx = {"event_label": fk}
-        if len(bits) > 1 and bits[1]:
-            ctx["fixture_id"] = int(bits[1])
-        if len(bits) > 2 and bits[2]:
-            ctx["matchbook_event_id"] = int(bits[2])
-        if " v " in fk:
-            h, a = fk.split(" v ", 1)
-            ctx["home_team"] = h.strip()
-            ctx["away_team"] = a.strip()
-        contexts[fk] = ctx
-    return keys, contexts
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="FVE tiered ingest worker")
-    ap.add_argument("--fixtures", required=True, help="fixture_key:fixture_id:matchbook_event_id,...")
+    ap.add_argument(
+        "--auto",
+        action="store_true",
+        help="auto-discover upcoming fixtures (API-Football); refreshes hourly",
+    )
+    ap.add_argument(
+        "--fixtures",
+        default="",
+        help="fixture_key:fixture_id:matchbook_event_id,... (optional with --auto)",
+    )
     ap.add_argument(
         "--uniform-interval",
         type=float,
@@ -71,9 +58,17 @@ def main() -> None:
         help="use blocking sync scheduler instead of async 250ms loop",
     )
     args = ap.parse_args()
-    keys, contexts = _parse_fixtures(args.fixtures)
+    if args.auto or os.environ.get("FVE_AUTO_WATCHLIST", "").strip().lower() in ("1", "true", "yes"):
+        from pipeline.auto_ingest import run_auto_ingest
+
+        run_auto_ingest(max_cycles=args.max_cycles)
+        return
+    from pipeline.watchlist import parse_fixture_spec
+
+    spec = args.fixtures or os.environ.get("WATCHLIST_FIXTURES", "")
+    keys, contexts = parse_fixture_spec(spec)
     if not keys:
-        print("No fixtures", file=sys.stderr)
+        print("No fixtures — use --auto or --fixtures / WATCHLIST_FIXTURES", file=sys.stderr)
         sys.exit(1)
     tiered = args.uniform_interval is None
     run_ingest_loop(

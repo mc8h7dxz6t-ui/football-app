@@ -1,6 +1,8 @@
 # Secrets — never commit real keys
 .streamlit/secrets.toml
 .env
+config/matchbook_map.json
+logs/
 
 # Python
 __pycache__/

@@ -1,6 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -11,6 +12,8 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
+    profiles: ["full"]
     environment:
       POSTGRES_USER: fve
       POSTGRES_PASSWORD: fve
@@ -29,36 +32,82 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${FVE_API_PORT:-8000}:8000"
+    env_file:
+      - .env
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+psycopg://fve:fve@postgres:5432/fve
-      API_SPORTS_KEY: ${API_SPORTS_KEY:-}
-      MATCHBOOK_USERNAME: ${MATCHBOOK_USERNAME:-}
-      MATCHBOOK_PASSWORD: ${MATCHBOOK_PASSWORD:-}
-      ODDS_API_KEY: ${ODDS_API_KEY:-}
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: python worker.py --fixtures "${WATCHLIST_FIXTURES:-}"
+    restart: unless-stopped
+    command: ["python", "worker.py", "--auto"]
+    env_file:
+      - .env
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql+psycopg://fve:fve@postgres:5432/fve
-      API_SPORTS_KEY: ${API_SPORTS_KEY:-}
-      MATCHBOOK_USERNAME: ${MATCHBOOK_USERNAME:-}
-      MATCHBOOK_PASSWORD: ${MATCHBOOK_PASSWORD:-}
-      WATCHLIST_FIXTURES: ${WATCHLIST_FIXTURES:-}
-      INGEST_INTERVAL_SEC: "5"
+      FVE_AUTO_WATCHLIST: "1"
+      FVE_WORKER_HEARTBEAT: /tmp/fve_worker_heartbeat
     depends_on:
       redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /tmp/fve_worker_heartbeat && test $(($(date +%s) - $(cat /tmp/fve_worker_heartbeat))) -lt 180",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    command:
+      [
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8501",
+        "--server.address",
+        "0.0.0.0",
+      ]
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      FVE_API_URL: http://api:8000
+    depends_on:
+      api:
         condition: service_healthy
 
 volumes:

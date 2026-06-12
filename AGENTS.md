@@ -46,7 +46,9 @@ Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge 
 |-----------|----------------|
 | Pro deps | `pip install -r requirements-pro.txt` |
 | API | `uvicorn api.main:app --port 8000` |
-| Ingest worker | `python worker.py --fixtures 'key:id:matchbook_id'` (tiered: exchange 1s, soft 5s) |
+| Hands-off stack | `cp .env.example .env` → `bash scripts/run_stack.sh` (Redis + API + auto worker + UI) |
+| Ingest worker | `python worker.py --auto` (discover fixtures) or `--fixtures 'key:id:matchbook_id'` |
+| Preflight | `bash scripts/preflight_fve.sh` — budgets + optional line cache check |
 | Exchange poll override | `FEED_POLL_SEC_MATCHBOOK=0.5` |
 | Intra-window peaks | Redis **ZSET** rings per market; `PEAK_ODDS_WINDOW_SEC=5` |
 | Async scheduler | Default in `worker.py`; `--sync` for blocking loop |
