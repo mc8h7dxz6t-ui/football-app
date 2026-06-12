@@ -33,7 +33,18 @@ from pipeline.ingest import run_ingest_loop
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _paused() -> bool:
+    v = os.environ.get("FVE_PAUSED", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def main() -> None:
+    if _paused():
+        print(
+            "FVE worker paused (FVE_PAUSED=1). hibs-bet owns live APIs — see docs/PAUSED.md",
+            file=sys.stderr,
+        )
+        sys.exit(0)
     ap = argparse.ArgumentParser(description="FVE tiered ingest worker")
     ap.add_argument(
         "--auto",

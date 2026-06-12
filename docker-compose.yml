@@ -60,6 +60,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
     restart: unless-stopped
+    profiles: ["ingest"]
     command: ["python", "worker.py", "--auto"]
     env_file:
       - .env
@@ -88,6 +89,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
     restart: unless-stopped
+    profiles: ["ui"]
     command:
       [
         "streamlit",

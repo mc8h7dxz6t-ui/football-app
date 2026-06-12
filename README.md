@@ -32,7 +32,10 @@ or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitigno
 streamlit run app.py
 ```
 
-### Inst++ pipeline (hands-off)
+> **Paused:** FVE live ingest is off while **hibs-bet** owns shared API keys. See `docs/PAUSED.md`.
+> Run `bash scripts/pause_fve.sh` on any machine. Use `~/Applications` (hibs-bet) for live football.
+
+### Inst++ pipeline (hands-off — when unpaused)
 
 One command starts Redis, API, **auto watchlist worker**, and Streamlit:
 

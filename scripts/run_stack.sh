@@ -19,13 +19,26 @@ set -a
 source .env
 set +a
 
+if [[ -f .env.paused ]]; then
+  # shellcheck disable=SC1091
+  set -a
+  source .env.paused
+  set +a
+fi
+
+if [[ "${FVE_PAUSED:-0}" == "1" ]] || [[ "${FVE_PAUSED:-}" =~ ^(true|yes|on)$ ]]; then
+  echo "FVE is PAUSED (hibs-bet owns live APIs). See docs/PAUSED.md"
+  echo "To resume: set FVE_PAUSED=0 in .env and ensure a dedicated API key or hibs upstream."
+  exit 0
+fi
+
 if [[ -z "${API_SPORTS_KEY:-}" && -z "${API_FOOTBALL_KEY:-}" ]]; then
   echo "Set API_SPORTS_KEY in .env for auto watchlist"
   exit 1
 fi
 
 echo "Starting Football Value Engine stack (docker compose)..."
-docker compose --env-file .env up -d --build
+docker compose --env-file .env --profile ingest --profile ui up -d --build
 
 echo ""
 echo "Waiting for API health..."
