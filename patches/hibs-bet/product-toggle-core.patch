@@ -1,44 +1,2399 @@
-From d7d25b2226381589c392defe22cafa1ad5a9c40f Mon Sep 17 00:00:00 2001
-From: Cursor Agent <cursor-agent@users.noreply.github.com>
-Date: Sat, 13 Jun 2026 11:43:17 +0000
-Subject: [PATCH] Wire racing + trading product toggles with live stack status
-
-- Production URL defaults for racing/trading pills when HIBS_PRODUCTION=1
-- stack_ops_probe pings racing (/api/racing/ping) and trading metrics
-- Product bar green/amber/red dots from /api/health stack_ops
-- Trading dashboard uses shared _product_switcher (all 3 products)
-- /status stack-ops section + wire_product_toggles.sh VPS installer
----
- .env.example                                  |   1 +
- scripts/institutional_vps_watchdog.sh         |   5 +
- scripts/wire_product_toggles.sh               |  65 +++++++++
- .../health_quality_narrative.py               |  14 +-
- src/hibs_predictor/product_links.py           |  76 ++++++++++
- src/hibs_predictor/stack_ops_probe.py         | 133 ++++++++++++++++++
- src/hibs_predictor/web.py                     |  20 +--
- static/hibs_audit_ops.js                      |  50 ++++++-
- static/hibs_product_stacks.js                 |  46 ++++++
- templates/_product_switcher.html              |  15 +-
- templates/api_status.html                     |   6 +
- templates/harvested_execution_status.html     |   9 +-
- tests/test_product_links.py                   |  43 ++++++
- tests/test_stack_ops_probe.py                 |  32 +++++
- 14 files changed, 485 insertions(+), 30 deletions(-)
- create mode 100755 scripts/wire_product_toggles.sh
- create mode 100644 src/hibs_predictor/product_links.py
- create mode 100644 src/hibs_predictor/stack_ops_probe.py
- create mode 100644 static/hibs_product_stacks.js
- create mode 100644 tests/test_product_links.py
- create mode 100644 tests/test_stack_ops_probe.py
-
+diff --git a/data/backtest_profiles/.forward_backfill_after.json b/data/backtest_profiles/.forward_backfill_after.json
+new file mode 100644
+index 0000000..fa723cc
+--- /dev/null
++++ b/data/backtest_profiles/.forward_backfill_after.json
+@@ -0,0 +1 @@
++{"window_days": 28, "since_iso": null, "n_snapshots": 0, "n_with_1x2_odds": 0, "capture_rate_pct": null, "n_scored": 0, "n_scored_with_1x2": 0, "scored_capture_rate_pct": null, "message": "No snapshots in last 28d."}
+diff --git a/data/backtest_profiles/.forward_backfill_before.json b/data/backtest_profiles/.forward_backfill_before.json
+new file mode 100644
+index 0000000..fa723cc
+--- /dev/null
++++ b/data/backtest_profiles/.forward_backfill_before.json
+@@ -0,0 +1 @@
++{"window_days": 28, "since_iso": null, "n_snapshots": 0, "n_with_1x2_odds": 0, "capture_rate_pct": null, "n_scored": 0, "n_scored_with_1x2": 0, "scored_capture_rate_pct": null, "message": "No snapshots in last 28d."}
+diff --git a/data/backtest_profiles/.forward_backfill_historic_runs.jsonl b/data/backtest_profiles/.forward_backfill_historic_runs.jsonl
+new file mode 100644
+index 0000000..4112b1e
+--- /dev/null
++++ b/data/backtest_profiles/.forward_backfill_historic_runs.jsonl
+@@ -0,0 +1,8 @@
++{"league": "EPL", "exit_code": 0, "summary": {}}
++{"league": "SCOTLAND", "exit_code": 0, "summary": {}}
++{"league": "LA_LIGA", "exit_code": 0, "summary": {}}
++{"league": "SERIE_A", "exit_code": 0, "summary": {}}
++{"league": "BUNDESLIGA", "exit_code": 0, "summary": {}}
++{"league": "LIGUE_1", "exit_code": 0, "summary": {}}
++{"league": "UCL", "exit_code": 0, "summary": {}}
++{"league": "EUROPA_LEAGUE", "exit_code": 0, "summary": {}}
+diff --git a/deploy/product_switcher_inject.py b/deploy/product_switcher_inject.py
+new file mode 100644
+index 0000000..09b0e7a
+--- /dev/null
++++ b/deploy/product_switcher_inject.py
+@@ -0,0 +1,44 @@
++"""Inject shared HIBS product toggle bar into hibs-racing HTML responses."""
++
++from __future__ import annotations
++
++
++def product_switcher_html(*, active: str = "racing") -> str:
++    """Same-origin links: / · /racing/cards · /harvested-execution."""
++    active = active if active in ("football", "racing", "trading") else "racing"
++    pills = [
++        ("football", "/", "⚽ Football"),
++        ("racing", "/racing/cards", "🏇 Racing"),
++        ("trading", "/harvested-execution", "📈 Trading"),
++    ]
++    pill_html = []
++    for key, href, label in pills:
++        cls = "hibs-product-pill active" if key == active else "hibs-product-pill"
++        if key in ("racing", "trading"):
++            pill_html.append(
++                f'<a href="{href}" class="{cls}" rel="noopener">{label}</a>'
++            )
++        else:
++            pill_html.append(f'<a href="{href}" class="{cls}">{label}</a>')
++    pills_joined = "\n".join(pill_html)
++    return f"""
++<style id="hibs-product-switcher-inject">
++.hibs-product-bar-inject{{
++    display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;
++    padding:8px 14px;margin:0 0 12px;
++    background:rgba(6,14,24,0.92);border:1px solid rgba(148,163,184,0.22);border-radius:10px;
++    font-family:system-ui,-apple-system,sans-serif;
++}}
++.hibs-product-switch-inject{{display:inline-flex;border:1px solid rgba(148,163,184,0.25);border-radius:999px;overflow:hidden;}}
++.hibs-product-pill{{padding:6px 14px;font-size:0.82em;font-weight:700;text-decoration:none;color:#cbd5e1;background:rgba(0,0,0,0.25);}}
++.hibs-product-pill:hover{{background:rgba(0,122,51,0.2);color:#e2e8f0;}}
++.hibs-product-pill.active{{background:linear-gradient(135deg,#007A33,#055a28);color:#fff;}}
++.hibs-product-label{{font-size:0.75em;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;}}
++</style>
++<nav class="hibs-product-bar-inject" role="navigation" aria-label="HIBS products" id="hibs-product-bar-inject">
++  <span class="hibs-product-label">HIBS</span>
++  <div class="hibs-product-switch-inject">
++{pills_joined}
++  </div>
++</nav>
++"""
+diff --git a/deploy/racing_production_guards.py b/deploy/racing_production_guards.py
+index 7297cee..932cd91 100644
+--- a/deploy/racing_production_guards.py
++++ b/deploy/racing_production_guards.py
+@@ -99,6 +99,20 @@ def apply_production_guards(app: Flask) -> None:
+             return resp
+ 
+         inject_parts: list[str] = []
++        body_changed = False
++
++        if _production_subpath() and "hibs-product-bar-inject" not in body:
++            try:
++                from product_switcher_inject import product_switcher_html
++
++                bar = product_switcher_html(active="racing")
++                if re.search(r"<body[\s>]", body, flags=re.I):
++                    body = re.sub(r"(<body[^>]*>)", r"\1" + bar, body, count=1, flags=re.I)
++                    body_changed = True
++                else:
++                    inject_parts.append(bar)
++            except Exception:
++                pass
+ 
+         if _production_subpath() and "hibs-racing-nav-fix" not in body:
+             nav_js = _nav_fix_js()
+@@ -136,13 +150,14 @@ a[href*="refresh" i] { display: none !important; }
+ """
+                 )
+ 
+-        if not inject_parts:
+-            return resp
++        if inject_parts:
++            inject = "".join(inject_parts)
++            if "</body>" in body:
++                body = body.replace("</body>", inject + "</body>", 1)
++            else:
++                body += inject
++            body_changed = True
+ 
+-        inject = "".join(inject_parts)
+-        if "</body>" in body:
+-            body = body.replace("</body>", inject + "</body>", 1)
+-        else:
+-            body += inject
+-        resp.set_data(body)
++        if body_changed:
++            resp.set_data(body)
+         return resp
+diff --git a/patches/product-toggle-core.patch b/patches/product-toggle-core.patch
+new file mode 100644
+index 0000000..499d145
+--- /dev/null
++++ b/patches/product-toggle-core.patch
+@@ -0,0 +1,706 @@
++From d7d25b2226381589c392defe22cafa1ad5a9c40f Mon Sep 17 00:00:00 2001
++From: Cursor Agent <cursor-agent@users.noreply.github.com>
++Date: Sat, 13 Jun 2026 11:43:17 +0000
++Subject: [PATCH] Wire racing + trading product toggles with live stack status
++
++- Production URL defaults for racing/trading pills when HIBS_PRODUCTION=1
++- stack_ops_probe pings racing (/api/racing/ping) and trading metrics
++- Product bar green/amber/red dots from /api/health stack_ops
++- Trading dashboard uses shared _product_switcher (all 3 products)
++- /status stack-ops section + wire_product_toggles.sh VPS installer
++---
++ .env.example                                  |   1 +
++ scripts/institutional_vps_watchdog.sh         |   5 +
++ scripts/wire_product_toggles.sh               |  65 +++++++++
++ .../health_quality_narrative.py               |  14 +-
++ src/hibs_predictor/product_links.py           |  76 ++++++++++
++ src/hibs_predictor/stack_ops_probe.py         | 133 ++++++++++++++++++
++ src/hibs_predictor/web.py                     |  20 +--
++ static/hibs_audit_ops.js                      |  50 ++++++-
++ static/hibs_product_stacks.js                 |  46 ++++++
++ templates/_product_switcher.html              |  15 +-
++ templates/api_status.html                     |   6 +
++ templates/harvested_execution_status.html     |   9 +-
++ tests/test_product_links.py                   |  43 ++++++
++ tests/test_stack_ops_probe.py                 |  32 +++++
++ 14 files changed, 485 insertions(+), 30 deletions(-)
++ create mode 100755 scripts/wire_product_toggles.sh
++ create mode 100644 src/hibs_predictor/product_links.py
++ create mode 100644 src/hibs_predictor/stack_ops_probe.py
++ create mode 100644 static/hibs_product_stacks.js
++ create mode 100644 tests/test_product_links.py
++ create mode 100644 tests/test_stack_ops_probe.py
++
++diff --git a/scripts/institutional_vps_watchdog.sh b/scripts/institutional_vps_watchdog.sh
++index 29705f5..0e49b70 100755
++--- a/scripts/institutional_vps_watchdog.sh
+++++ b/scripts/institutional_vps_watchdog.sh
++@@ -66,6 +66,11 @@ repair_infra() {
++     fi
++   fi
++ 
+++  if [[ -f "${APP}/scripts/wire_product_toggles.sh" ]]; then
+++    log "repair: wire product toggles (racing + trading cross-links)"
+++    bash "${APP}/scripts/wire_product_toggles.sh" || warn "wire_product_toggles failed"
+++  fi
+++
++   log "repair: reinstall ops crons if missing"
++   if [[ -f "${APP}/deploy/cron-hibs-ops-automation.sh" ]]; then
++     bash "${APP}/deploy/cron-hibs-ops-automation.sh" --install || true
++diff --git a/scripts/wire_product_toggles.sh b/scripts/wire_product_toggles.sh
++new file mode 100755
++index 0000000..3cafa69
++--- /dev/null
+++++ b/scripts/wire_product_toggles.sh
++@@ -0,0 +1,65 @@
+++#!/usr/bin/env bash
+++# Wire football ↔ racing ↔ trading product toggles on VPS (cross-link .env + restart).
+++#
+++#   sudo bash /opt/hibs-bet/scripts/wire_product_toggles.sh
+++#   DEPLOY_HOST=77.68.89.73 ./scripts/wire_product_toggles.sh --remote
+++set -euo pipefail
+++
+++APP="${DEPLOY_PATH:-/opt/hibs-bet}"
+++REMOTE=0
+++for arg in "$@"; do
+++  [[ "${arg}" == "--remote" ]] && REMOTE=1
+++done
+++
+++if [[ "${REMOTE}" -eq 1 ]]; then
+++  HOST="${DEPLOY_HOST:-77.68.89.73}"
+++  USER="${DEPLOY_USER:-root}"
+++  exec ssh -o BatchMode=yes -o ConnectTimeout=25 "${USER}@${HOST}" \
+++    "export DEPLOY_PATH='${APP}'; bash '${APP}/scripts/wire_product_toggles.sh'"
+++fi
+++
+++[[ "$(id -u)" -eq 0 ]] || { echo "run as root on VPS" >&2; exit 1; }
+++cd "${APP}"
+++
+++log() { echo "[product-toggle] $*"; }
+++
+++touch "${APP}/.env"
+++for kv in HIBS_PRODUCTION=1 HIBS_HEALTH_STACK_PROBE=1; do
+++  k="${kv%%=*}"
+++  grep -q "^${k}=" "${APP}/.env" 2>/dev/null || echo "${kv}" >>"${APP}/.env"
+++done
+++
+++if [[ -f "${APP}/deploy/apply-vps-site-cross-links.sh" ]]; then
+++  log "cross-link racing + trading URLs in football .env"
+++  bash "${APP}/deploy/apply-vps-site-cross-links.sh"
+++else
+++  log "WARN: apply-vps-site-cross-links.sh missing — set HIBS_RACING_BASE_URL manually"
+++fi
+++
+++if systemctl is-enabled hibs-bet &>/dev/null; then
+++  log "restart hibs-bet"
+++  systemctl restart hibs-bet
+++  sleep 2
+++fi
+++
+++PY="${APP}/.venv/bin/python3"
+++[[ -x "${PY}" ]] || PY=python3
+++export PYTHONPATH="${APP}/src"
+++set -a
+++# shellcheck disable=SC1091
+++source "${APP}/.env"
+++set +a
+++
+++log "stack probe snapshot"
+++"${PY}" -c "
+++from hibs_predictor.stack_ops_probe import probe_racing_stack, probe_trading_stack
+++import json
+++print(json.dumps({'racing': probe_racing_stack(), 'trading': probe_trading_stack()}, indent=2))
+++"
+++
+++if [[ -f "${APP}/scripts/verify_hibs_ui_smoke.sh" ]]; then
+++  log "UI smoke (football + racing + trading)"
+++  bash "${APP}/scripts/verify_hibs_ui_smoke.sh" || true
+++fi
+++
+++log "done — product bar should show green dots when stacks are live"
++diff --git a/src/hibs_predictor/health_quality_narrative.py b/src/hibs_predictor/health_quality_narrative.py
++index 84912a8..7e8e9de 100644
++--- a/src/hibs_predictor/health_quality_narrative.py
+++++ b/src/hibs_predictor/health_quality_narrative.py
++@@ -382,15 +382,21 @@ def augment_health_for_ui(health: Dict[str, Any]) -> Dict[str, Any]:
++     except Exception as exc:
++         out["institutional_readiness"] = {"error": str(exc)[:120]}
++     load_dotenv()
+++    try:
+++        from hibs_predictor.stack_ops_probe import augment_stack_ops
+++
+++        augment_stack_ops(out)
+++    except Exception as exc:
+++        out["stack_ops"] = out.get("stack_ops") or {"error": str(exc)[:120]}
++     if (os.getenv("HIBS_HEALTH_RACING_PROBE") or "").strip().lower() in ("1", "true", "yes", "on"):
++         try:
++             from hibs_predictor.racing_evidence import racing_evidence_gates
++ 
++             out["stack_ops"] = out.get("stack_ops") or {}
++-            out["stack_ops"]["racing"] = racing_evidence_gates()
++-            rr = out["stack_ops"]["racing"]
+++            out["stack_ops"]["racing_evidence"] = racing_evidence_gates()
+++            rr = out["stack_ops"]["racing_evidence"]
++             if rr.get("buyer_ready"):
++-                bullets.append("Racing evidence: buyer_ready — see stack_ops.racing on /api/health.")
+++                bullets.append("Racing evidence: buyer_ready — see stack_ops.racing_evidence on /api/health.")
++             elif rr.get("critical_pass"):
++                 bullets.append(
++                     f"Racing link OK (grade {rr.get('evidence_grade', '?')}); evidence gates open — "
++@@ -398,5 +404,5 @@ def augment_health_for_ui(health: Dict[str, Any]) -> Dict[str, Any]:
++                 )
++         except Exception as exc:
++             out["stack_ops"] = out.get("stack_ops") or {}
++-            out["stack_ops"]["racing"] = {"error": str(exc)[:120]}
+++            out["stack_ops"]["racing_evidence"] = {"error": str(exc)[:120]}
++     return out
++diff --git a/src/hibs_predictor/product_links.py b/src/hibs_predictor/product_links.py
++new file mode 100644
++index 0000000..f1094a0
++--- /dev/null
+++++ b/src/hibs_predictor/product_links.py
++@@ -0,0 +1,76 @@
+++"""Cross-product navigation URLs (football · racing · trading) for the product bar."""
+++
+++from __future__ import annotations
+++
+++import os
+++from typing import Any, Dict
+++
+++
+++def _env_truthy(name: str) -> bool:
+++    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
+++
+++
+++def production_mode() -> bool:
+++    return _env_truthy("HIBS_PRODUCTION")
+++
+++
+++def site_domain() -> str:
+++    return (os.getenv("HIBS_DOMAIN") or "hibs-bet.co.uk").strip().rstrip("/")
+++
+++
+++def football_production_url() -> str:
+++    return (os.getenv("HIBS_PRODUCTION_URL") or f"https://{site_domain()}").rstrip("/")
+++
+++
+++def football_home_url() -> str:
+++    raw = (os.getenv("HIBS_FOOTBALL_HOME_URL") or "/").strip()
+++    return raw or "/"
+++
+++
+++def racing_base_url() -> str:
+++    explicit = (os.getenv("HIBS_RACING_BASE_URL") or "").strip().rstrip("/")
+++    if explicit:
+++        return explicit
+++    if production_mode():
+++        return f"{football_production_url()}/racing"
+++    return "http://127.0.0.1:5003"
+++
+++
+++def trading_status_url() -> str:
+++    explicit = (os.getenv("HIBS_TRADING_STATUS_URL") or "").strip().rstrip("/")
+++    if explicit:
+++        return explicit
+++    if production_mode():
+++        return f"{football_production_url()}/harvested-execution"
+++    return "http://127.0.0.1:9110/"
+++
+++
+++def portfolio_api_url() -> str:
+++    explicit = (os.getenv("HIBS_PORTFOLIO_API_URL") or "").strip()
+++    if explicit:
+++        return explicit
+++    if production_mode():
+++        return "/api/racing/portfolio/summary"
+++    return "http://127.0.0.1:5003/api/portfolio/summary"
+++
+++
+++def product_active_from_env(default: str = "football") -> str:
+++    raw = (os.getenv("HIBS_PRODUCT_ACTIVE") or default).strip().lower()
+++    return raw if raw in ("football", "racing", "trading") else default
+++
+++
+++def product_bar_context(*, active: str | None = None) -> Dict[str, Any]:
+++    """Template context for _product_switcher.html and portfolio bar."""
+++    racing = racing_base_url()
+++    active_product = active or product_active_from_env()
+++    return {
+++        "hibs_football_home_url": football_home_url(),
+++        "hibs_racing_base_url": racing,
+++        "hibs_trading_status_url": trading_status_url(),
+++        "hibs_product_active": active_product,
+++        "portfolio_api_url": portfolio_api_url(),
+++        "portfolio_racing_url": f"{racing}/portfolio",
+++        "portfolio_football_url": "/tracker",
+++        "trading_metrics_url": (os.getenv("TRADING_METRICS_URL") or "http://127.0.0.1:9109").rstrip("/"),
+++        "hibs_stack_probe_enabled": production_mode() or _env_truthy("HIBS_HEALTH_STACK_PROBE"),
+++    }
++diff --git a/src/hibs_predictor/stack_ops_probe.py b/src/hibs_predictor/stack_ops_probe.py
++new file mode 100644
++index 0000000..74a2688
++--- /dev/null
+++++ b/src/hibs_predictor/stack_ops_probe.py
++@@ -0,0 +1,133 @@
+++"""Lightweight racing + trading stack probes for /api/health and product bar status."""
+++
+++from __future__ import annotations
+++
+++import json
+++import os
+++import time
+++import urllib.error
+++import urllib.request
+++from typing import Any, Dict, List, Tuple
+++
+++from hibs_predictor.product_links import football_production_url, production_mode, racing_base_url
+++
+++
+++def _env_truthy(name: str) -> bool:
+++    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
+++
+++
+++def stack_probe_enabled() -> bool:
+++    return production_mode() or _env_truthy("HIBS_HEALTH_STACK_PROBE")
+++
+++
+++def _http_probe(url: str, *, timeout: float = 4.0) -> Tuple[bool, str, int]:
+++    started = time.monotonic()
+++    try:
+++        req = urllib.request.Request(url, headers={"User-Agent": "hibs-bet-stack-probe/1.0"})
+++        with urllib.request.urlopen(req, timeout=timeout) as resp:
+++            body = resp.read().decode("utf-8", errors="replace")
+++            latency_ms = int((time.monotonic() - started) * 1000)
+++            ok = int(resp.status) == 200
+++            if ok and '"ok"' in body:
+++                try:
+++                    data = json.loads(body)
+++                    ok = bool(data.get("ok", True)) if isinstance(data, dict) else ok
+++                except Exception:
+++                    pass
+++            return ok, body[:160], latency_ms
+++    except urllib.error.HTTPError as exc:
+++        latency_ms = int((time.monotonic() - started) * 1000)
+++        try:
+++            body = exc.read().decode("utf-8", errors="replace")
+++        except Exception:
+++            body = str(exc)
+++        return False, body[:160], latency_ms
+++    except Exception as exc:
+++        latency_ms = int((time.monotonic() - started) * 1000)
+++        return False, str(exc)[:160], latency_ms
+++
+++
+++def probe_racing_stack() -> Dict[str, Any]:
+++    """Ping racing via nginx proxy first, then direct racing base."""
+++    football = football_production_url()
+++    racing = racing_base_url()
+++    candidates: List[Tuple[str, str]] = [
+++        ("proxy", f"{football}/api/racing/ping"),
+++        ("direct", f"{racing}/api/ping"),
+++    ]
+++    last_detail = ""
+++    last_latency: int | None = None
+++    last_url = candidates[0][1]
+++    seen = set()
+++    for label, url in candidates:
+++        if url in seen:
+++            continue
+++        seen.add(url)
+++        last_url = url
+++        ok, detail, latency_ms = _http_probe(url)
+++        last_detail = detail
+++        last_latency = latency_ms
+++        if ok:
+++            return {
+++                "online": True,
+++                "status": "live",
+++                "probe": label,
+++                "url": url,
+++                "latency_ms": latency_ms,
+++            }
+++    return {
+++        "online": False,
+++        "status": "offline",
+++        "probe": "failed",
+++        "url": last_url,
+++        "detail": last_detail,
+++        "latency_ms": last_latency,
+++    }
+++
+++
+++def probe_trading_stack(*, timeout: float = 2.5) -> Dict[str, Any]:
+++    from hibs_predictor.trading_status import fetch_trading_status, trading_metrics_base_url
+++
+++    base = trading_metrics_base_url()
+++    out: Dict[str, Any] = {
+++        "online": False,
+++        "status": "offline",
+++        "metrics_url": base,
+++        "ready": None,
+++        "phase": None,
+++        "error": None,
+++    }
+++    try:
+++        status = fetch_trading_status(timeout=timeout)
+++        online = bool(status.get("online"))
+++        out.update(
+++            {
+++                "online": online,
+++                "status": "live" if online else "warm" if status.get("ready") == 200 else "offline",
+++                "ready": status.get("ready_text") or status.get("ready"),
+++                "phase": (status.get("config") or {}).get("phase"),
+++                "error": status.get("error"),
+++                "metrics_url": status.get("metrics_url") or base,
+++            }
+++        )
+++    except Exception as exc:
+++        out["error"] = str(exc)[:160]
+++    return out
+++
+++
+++def augment_stack_ops(health: Dict[str, Any]) -> None:
+++    """Attach stack_ops.racing / stack_ops.trading without heavy evidence scoring."""
+++    if not stack_probe_enabled():
+++        return
+++    stack = health.get("stack_ops") if isinstance(health.get("stack_ops"), dict) else {}
+++    stack = dict(stack)
+++    stack["racing"] = probe_racing_stack()
+++    stack["trading"] = probe_trading_stack()
+++    if _env_truthy("HIBS_HEALTH_RACING_PROBE"):
+++        try:
+++            from hibs_predictor.racing_evidence import racing_evidence_gates
+++
+++            stack["racing_evidence"] = racing_evidence_gates()
+++        except Exception as exc:
+++            stack["racing_evidence"] = {"error": str(exc)[:120]}
+++    health["stack_ops"] = stack
++diff --git a/src/hibs_predictor/web.py b/src/hibs_predictor/web.py
++index 8ba35bb..9d1db5f 100644
++--- a/src/hibs_predictor/web.py
+++++ b/src/hibs_predictor/web.py
++@@ -311,21 +311,9 @@ def inject_sky_dock():
++     ctx["hibs_auth_enabled"] = auth_enabled()
++     ctx["hibs_logged_in"] = is_logged_in()
++     ctx.update(hibs_brand_context())
++-    ctx["portfolio_api_url"] = os.environ.get(
++-        "HIBS_PORTFOLIO_API_URL", "http://127.0.0.1:5003/api/portfolio/summary"
++-    )
++-    racing_base = os.environ.get("HIBS_RACING_BASE_URL", "http://127.0.0.1:5003").rstrip("/")
++-    ctx["hibs_racing_base_url"] = racing_base
++-    ctx["hibs_football_home_url"] = "/"
++-    ctx["hibs_product_active"] = "football"
++-    ctx["hibs_trading_status_url"] = os.environ.get(
++-        "HIBS_TRADING_STATUS_URL", "http://127.0.0.1:9110/"
++-    )
++-    ctx["trading_metrics_url"] = os.environ.get(
++-        "TRADING_METRICS_URL", "http://127.0.0.1:9109"
++-    )
++-    ctx["portfolio_racing_url"] = racing_base + "/portfolio"
++-    ctx["portfolio_football_url"] = "/tracker"
+++    from hibs_predictor.product_links import product_bar_context
+++
+++    ctx.update(product_bar_context(active="football"))
++     try:
++         from hibs_predictor.affiliate_config import public_affiliate_context
++ 
++@@ -3682,9 +3670,11 @@ def api_cache_clear():
++ def harvested_execution_status_page():
++     """Harvested Execution ops dashboard (paper/shadow metrics)."""
++     from hibs_predictor.hibs_brand import hibs_brand_context
+++    from hibs_predictor.product_links import product_bar_context
++     from hibs_predictor.trading_status import trading_metrics_base_url
++ 
++     ctx = hibs_brand_context()
+++    ctx.update(product_bar_context(active="trading"))
++     ctx["metrics_url"] = trading_metrics_base_url()
++     return render_template("harvested_execution_status.html", **ctx)
++ 
++diff --git a/static/hibs_audit_ops.js b/static/hibs_audit_ops.js
++index aa25fcd..beb1380 100644
++--- a/static/hibs_audit_ops.js
+++++ b/static/hibs_audit_ops.js
++@@ -298,11 +298,58 @@
++         }
++     }
++ 
+++    function applyStackOpsSection(stackOps) {
+++        var section = document.getElementById('stack-ops');
+++        if (!section) return;
+++        stackOps = stackOps || {};
+++        var headline = document.getElementById('status-stack-headline');
+++        var grid = document.getElementById('status-stack-grid');
+++        var racing = stackOps.racing || {};
+++        var trading = stackOps.trading || {};
+++        var rOk = !!racing.online;
+++        var tOk = !!trading.online;
+++        if (headline) {
+++            headline.textContent =
+++                (rOk ? 'Racing live' : 'Racing offline') +
+++                ' · ' +
+++                (tOk ? 'Trading live' : 'Trading offline');
+++        }
+++        if (!grid) return;
+++        grid.innerHTML = '';
+++        [
+++            { label: '🏇 Racing', data: racing },
+++            { label: '📈 Trading', data: trading },
+++        ].forEach(function (row) {
+++            var d = row.data || {};
+++            var card = document.createElement('article');
+++            card.className = 'health-card';
+++            var ok = !!d.online;
+++            card.innerHTML =
+++                '<h3>' +
+++                esc(row.label) +
+++                ' <span class="health-pill ' +
+++                (ok ? 'ok' : 'bad') +
+++                '">' +
+++                (ok ? 'live' : d.status || 'offline') +
+++                '</span></h3>' +
+++                '<p class="health-detail">' +
+++                esc(d.url || d.metrics_url || '—') +
+++                (d.latency_ms != null ? ' · ' + d.latency_ms + 'ms' : '') +
+++                (d.phase ? ' · ' + d.phase : '') +
+++                '</p>';
+++            grid.appendChild(card);
+++        });
+++        if (global.HibsProductStacks && global.HibsProductStacks.apply) {
+++            global.HibsProductStacks.apply(stackOps);
+++        }
+++    }
+++
++     function applyFromHealth(d) {
++         var ao = (d && d.audit_ops) || {};
++         var ir = (d && d.institutional_readiness) || {};
++         applyInstGradeChip(ir);
++         applyInstGradeSection(ir);
+++        applyStackOpsSection(d && d.stack_ops);
++         applyAuditOpsChip(ao);
++         applyAuditEvidenceSection(ao);
++     }
++@@ -324,7 +371,8 @@
++             document.getElementById('hibs-inst-grade-chip') ||
++             document.getElementById('hibs-audit-ops-chip') ||
++             document.getElementById('audit-evidence') ||
++-            document.getElementById('inst-grade')
+++            document.getElementById('inst-grade') ||
+++            document.getElementById('stack-ops')
++         );
++     }
++ 
++diff --git a/static/hibs_product_stacks.js b/static/hibs_product_stacks.js
++new file mode 100644
++index 0000000..d09c200
++--- /dev/null
+++++ b/static/hibs_product_stacks.js
++@@ -0,0 +1,46 @@
+++/**
+++ * Product bar stack status dots — racing + trading from /api/health stack_ops.
+++ */
+++(function (global) {
+++    'use strict';
+++
+++    function setDot(id, status, title) {
+++        var el = document.getElementById(id);
+++        if (!el) return;
+++        el.classList.remove('live', 'warm', 'offline');
+++        if (status) el.classList.add(status);
+++        if (title) el.title = title;
+++    }
+++
+++    function applyStackOps(stackOps) {
+++        stackOps = stackOps || {};
+++        var racing = stackOps.racing || {};
+++        var trading = stackOps.trading || {};
+++        var rStatus = racing.online ? 'live' : (racing.status === 'warm' ? 'warm' : 'offline');
+++        var tStatus = trading.online ? 'live' : (trading.status === 'warm' ? 'warm' : 'offline');
+++        var rTitle = racing.online
+++            ? 'Racing live' + (racing.latency_ms != null ? ' (' + racing.latency_ms + 'ms)' : '')
+++            : 'Racing offline' + (racing.detail ? ' — ' + racing.detail : '');
+++        var tTitle = trading.online
+++            ? 'Trading live' + (trading.phase ? ' · ' + trading.phase : '')
+++            : 'Trading offline' + (trading.error ? ' — ' + trading.error : '');
+++        setDot('hibs-stack-racing', rStatus, rTitle);
+++        setDot('hibs-stack-trading', tStatus, tTitle);
+++    }
+++
+++    function poll() {
+++        fetch('/api/health', { credentials: 'same-origin' })
+++            .then(function (r) { return r.ok ? r.json() : null; })
+++            .then(function (d) {
+++                if (d && d.stack_ops) applyStackOps(d.stack_ops);
+++            })
+++            .catch(function () {});
+++    }
+++
+++    if (document.getElementById('hibs-stack-racing') || document.getElementById('hibs-stack-trading')) {
+++        poll();
+++        setInterval(poll, 120000);
+++    }
+++
+++    global.HibsProductStacks = { apply: applyStackOps, poll: poll };
+++})(typeof window !== 'undefined' ? window : global);
++diff --git a/templates/_product_switcher.html b/templates/_product_switcher.html
++index 1d76b1d..34fc232 100644
++--- a/templates/_product_switcher.html
+++++ b/templates/_product_switcher.html
++@@ -12,6 +12,14 @@
++ }
++ .hibs-product-pill:hover{background:rgba(0,122,51,0.2);color:#e2e8f0;}
++ .hibs-product-pill.active{background:linear-gradient(135deg,#007A33,#055a28);color:#fff;}
+++.hibs-stack-dot{
+++    display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;vertical-align:middle;
+++    background:#64748b;box-shadow:0 0 0 1px rgba(0,0,0,0.35);
+++}
+++.hibs-stack-dot.live{background:#22c55e;}
+++.hibs-stack-dot.warm{background:#f59e0b;}
+++.hibs-stack-dot.offline{background:#ef4444;}
+++.hibs-product-pill.active .hibs-stack-dot{box-shadow:0 0 0 1px rgba(255,255,255,0.35);}
++ .hibs-harvested-logo-link{display:inline-flex;align-items:center;line-height:0;flex-shrink:0;}
++ .hibs-harvested-logo,.hibs-header-logo{height:56px;width:auto;max-width:min(420px,58vw);object-fit:contain;filter:drop-shadow(0 2px 12px rgba(0,0,0,0.35));}
++ .hibs-product-bar .hibs-harvested-logo{height:64px;max-width:min(480px,62vw);}
++@@ -30,11 +38,14 @@
++            class="hibs-product-pill {% if hibs_product_active == 'football' %}active{% endif %}">⚽ Football</a>
++         <a href="{{ hibs_racing_base_url }}/cards"
++            class="hibs-product-pill {% if hibs_product_active == 'racing' %}active{% endif %}"
++-           rel="noopener">🏇 Racing</a>
+++           rel="noopener" data-stack-pill="racing" title="Racing cards & insights">
+++           🏇 Racing<span class="hibs-stack-dot" id="hibs-stack-racing" aria-hidden="true"></span></a>
++         <a href="{{ hibs_trading_status_url|default('http://127.0.0.1:9110/') }}"
++            class="hibs-product-pill {% if hibs_product_active == 'trading' %}active{% endif %}"
++-           rel="noopener" title="Harvested Execution — paper metrics">📈 Trading</a>
+++           rel="noopener" data-stack-pill="trading" title="Harvested Execution — paper metrics">
+++           📈 Trading<span class="hibs-stack-dot" id="hibs-stack-trading" aria-hidden="true"></span></a>
++     </div>
++     <span class="hibs-product-bar-spacer" aria-hidden="true"></span>
++     {% include '_inst_grade_chip.html' %}
++ </div>
+++<script src="{{ url_for('static', filename='hibs_product_stacks.js') }}" defer></script>
++diff --git a/templates/api_status.html b/templates/api_status.html
++index be52225..b437736 100644
++--- a/templates/api_status.html
+++++ b/templates/api_status.html
++@@ -40,6 +40,12 @@
++             <div id="status-nine-ten-pillars" class="health-grid" style="margin-top:10px;"></div>
++             <p class="status-note" style="margin-top:10px;">Engineering = controls, tests, cron. Evidence = forward B2B gates. Nine-ten = full stack pillars — <a href="/status#audit-evidence">audit evidence</a> · <code>./scripts/score_hibs_nine_ten.sh</code></p>
++         </div>
+++        <div class="status-section" id="stack-ops">
+++            <h2>Product stacks (live)</h2>
+++            <p id="status-stack-headline" class="status-impact-headline">Checking racing + trading…</p>
+++            <div class="health-grid" id="status-stack-grid" style="margin-top:10px;"></div>
+++            <p class="status-note" style="margin-top:10px;">Green dot on the product bar = stack reachable. Wire cross-links: <code>sudo bash scripts/wire_product_toggles.sh</code></p>
+++        </div>
++         <div class="status-section">
++             <h2>How feeds affect predictions</h2>
++             <p id="status-quality-headline" class="status-impact-headline">—</p>
++diff --git a/templates/harvested_execution_status.html b/templates/harvested_execution_status.html
++index 26fcfef..a19dbd5 100644
++--- a/templates/harvested_execution_status.html
+++++ b/templates/harvested_execution_status.html
++@@ -52,14 +52,7 @@
++ </head>
++ <body>
++ <div class="wrap">
++-    <nav class="hibs-product-bar" aria-label="HIBS products">
++-        <svg class="hibs-stock-glyph" viewBox="0 0 24 24" aria-hidden="true"><path fill="#10b981" d="M4 18V6h2v12H4zm5-8v8H7V8h2zm5 4v4h-2v-4h2zm5-6v10h-2V8h2z"/></svg>
++-        <a href="/"><img class="hibs-harvested-logo" src="{{ url_for('static', filename=hibs_harvested_logo|default('hibs_harvested_logo.png')) }}" alt="{{ hibs_tagline_short|default('HIBS — Betting & Trading') }}"></a>
++-        <div class="hibs-product-switch">
++-            <a href="/" class="hibs-product-pill">⚽ Football</a>
++-            <span class="hibs-product-pill active">📈 Trading</span>
++-        </div>
++-    </nav>
+++    {% include '_product_switcher.html' %}
++ 
++     <div class="head">
++         <div>
++diff --git a/tests/test_product_links.py b/tests/test_product_links.py
++new file mode 100644
++index 0000000..b95ea14
++--- /dev/null
+++++ b/tests/test_product_links.py
++@@ -0,0 +1,43 @@
+++"""Tests for cross-product navigation URLs."""
+++
+++from __future__ import annotations
+++
+++import pytest
+++
+++from hibs_predictor.product_links import (
+++    football_home_url,
+++    portfolio_api_url,
+++    product_bar_context,
+++    racing_base_url,
+++    trading_status_url,
+++)
+++
+++
+++def test_production_defaults(monkeypatch):
+++    monkeypatch.delenv("HIBS_RACING_BASE_URL", raising=False)
+++    monkeypatch.delenv("HIBS_TRADING_STATUS_URL", raising=False)
+++    monkeypatch.delenv("HIBS_PORTFOLIO_API_URL", raising=False)
+++    monkeypatch.setenv("HIBS_PRODUCTION", "1")
+++    monkeypatch.setenv("HIBS_DOMAIN", "hibs-bet.co.uk")
+++    assert racing_base_url() == "https://hibs-bet.co.uk/racing"
+++    assert trading_status_url() == "https://hibs-bet.co.uk/harvested-execution"
+++    assert portfolio_api_url() == "/api/racing/portfolio/summary"
+++
+++
+++def test_dev_defaults(monkeypatch):
+++    monkeypatch.delenv("HIBS_PRODUCTION", raising=False)
+++    monkeypatch.delenv("HIBS_RACING_BASE_URL", raising=False)
+++    monkeypatch.delenv("HIBS_TRADING_STATUS_URL", raising=False)
+++    assert racing_base_url() == "http://127.0.0.1:5003"
+++    assert "127.0.0.1" in trading_status_url()
+++
+++
+++def test_product_bar_context_active(monkeypatch):
+++    monkeypatch.setenv("HIBS_FOOTBALL_HOME_URL", "https://hibs-bet.co.uk/")
+++    ctx = product_bar_context(active="trading")
+++    assert ctx["hibs_product_active"] == "trading"
+++    assert ctx["hibs_football_home_url"].rstrip("/") == "https://hibs-bet.co.uk"
+++
+++
+++def test_football_home_default():
+++    assert football_home_url() == "/"
++diff --git a/tests/test_stack_ops_probe.py b/tests/test_stack_ops_probe.py
++new file mode 100644
++index 0000000..c7facf7
++--- /dev/null
+++++ b/tests/test_stack_ops_probe.py
++@@ -0,0 +1,32 @@
+++"""Tests for stack_ops_probe."""
+++
+++from __future__ import annotations
+++
+++from hibs_predictor.stack_ops_probe import augment_stack_ops, stack_probe_enabled
+++
+++
+++def test_stack_probe_disabled_without_production(monkeypatch):
+++    monkeypatch.delenv("HIBS_PRODUCTION", raising=False)
+++    monkeypatch.delenv("HIBS_HEALTH_STACK_PROBE", raising=False)
+++    assert stack_probe_enabled() is False
+++
+++
+++def test_stack_probe_enabled_in_production(monkeypatch):
+++    monkeypatch.setenv("HIBS_PRODUCTION", "1")
+++    assert stack_probe_enabled() is True
+++
+++
+++def test_augment_stack_ops_adds_keys(monkeypatch):
+++    monkeypatch.setenv("HIBS_HEALTH_STACK_PROBE", "1")
+++    monkeypatch.setattr(
+++        "hibs_predictor.stack_ops_probe.probe_racing_stack",
+++        lambda: {"online": True, "status": "live"},
+++    )
+++    monkeypatch.setattr(
+++        "hibs_predictor.stack_ops_probe.probe_trading_stack",
+++        lambda **_: {"online": False, "status": "offline"},
+++    )
+++    health = {}
+++    augment_stack_ops(health)
+++    assert health["stack_ops"]["racing"]["online"] is True
+++    assert health["stack_ops"]["trading"]["online"] is False
++-- 
++2.43.0
++
+diff --git a/patches/wc-clv-f8-core.patch b/patches/wc-clv-f8-core.patch
+new file mode 100644
+index 0000000..48d93da
+--- /dev/null
++++ b/patches/wc-clv-f8-core.patch
+@@ -0,0 +1,649 @@
++From 135b2107349bb25c6fbeedd3a0804a24c28ff9c3 Mon Sep 17 00:00:00 2001
++From: Cursor Agent <cursor-agent@users.noreply.github.com>
++Date: Sat, 13 Jun 2026 11:08:11 +0000
++Subject: [PATCH] CLV: predicted_outcome fallback + scored backfill for WC F8
++ (inst++ evidence)
++
++- HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 (default): CLV on model pick when best_bet is null
++- backfill_clv_closing_for_scored() after pred-log-sync for already-FT audit rows
++- clv_beat_close_summary dedupes one row per fixture_id
++- scripts/diagnose_wc_clv.py for WC row inspection
++- Forward evidence F8 next_action mentions WC CLV path
++---
++ .env.example                                  |   2 +
++ scripts/diagnose_wc_clv.py                    |  66 ++++
++ src/hibs_predictor/forward_evidence.py        |   5 +-
++ src/hibs_predictor/prediction_log.py          | 316 ++++++++++++++++--
++ .../test_prediction_log_clv_institutional.py  | 124 +++++++
++ 5 files changed, 475 insertions(+), 38 deletions(-)
++ create mode 100644 scripts/diagnose_wc_clv.py
++
++diff --git a/scripts/diagnose_wc_clv.py b/scripts/diagnose_wc_clv.py
++new file mode 100644
++index 0000000..4f685b9
++--- /dev/null
+++++ b/scripts/diagnose_wc_clv.py
++@@ -0,0 +1,66 @@
+++#!/usr/bin/env python3
+++"""Diagnose WORLD_CUP audit rows vs forward CLV (F8) requirements."""
+++from __future__ import annotations
+++
+++import json
+++import sqlite3
+++import sys
+++from pathlib import Path
+++
+++ROOT = Path(__file__).resolve().parents[1]
+++sys.path.insert(0, str(ROOT / "src"))
+++
+++from hibs_predictor.forward_evidence import evidence_deploy_since_iso
+++from hibs_predictor.prediction_log import _db_path
+++
+++
+++def main() -> int:
+++    since = evidence_deploy_since_iso()
+++    conn = sqlite3.connect(_db_path())
+++    rows = conn.execute(
+++        """
+++        SELECT kickoff_iso, home_name, away_name, captured_at,
+++               result_outcome, result_recorded_at,
+++               prediction_json, enrich_summary_json
+++        FROM prediction_snapshots
+++        WHERE league_code = 'WORLD_CUP'
+++        ORDER BY kickoff_iso
+++        """
+++    ).fetchall()
+++    conn.close()
+++
+++    print("since_deploy:", since)
+++    print(f"WORLD_CUP snapshot rows: {len(rows)}\n")
+++
+++    for ko, h, a, cap, ro, rr, pj, ej in rows:
+++        post = (ko or "") >= (since or "")
+++        try:
+++            pred = json.loads(pj or "{}")
+++            best = pred.get("best_bet")
+++            has_1x2 = bool(pred.get("bookmaker_odds") or pred.get("line_odds"))
+++        except Exception:
+++            best, has_1x2 = None, False
+++        try:
+++        clv = json.loads(ej or "{}").get("clv") or {}
+++        pp = clv.get("clv_pp")
+++        stake = clv.get("clv_stake_outcome")
+++        src = clv.get("clv_stake_source")
+++    except Exception:
+++        pp = stake = src = None
+++
+++    if ro:
+++        status = "SCORED"
+++    elif rr:
+++        status = "partial"
+++    else:
+++        status = "PENDING"
+++
+++    tag = "POST" if post else "PRE"
+++    print(f"[{tag}] {status}  {ko}  {h} v {a}")
+++    print(f"      captured={cap}  1x2={has_1x2}  best_bet={best}  stake={stake}({src})  clv_pp={pp}")
+++
+++    return 0
+++
+++
+++if __name__ == "__main__":
+++    raise SystemExit(main())
++diff --git a/src/hibs_predictor/forward_evidence.py b/src/hibs_predictor/forward_evidence.py
++index 013f02f..af04cfb 100644
++--- a/src/hibs_predictor/forward_evidence.py
+++++ b/src/hibs_predictor/forward_evidence.py
++@@ -236,7 +236,10 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
++         actions.append("bash scripts/run_forward_backfill_plan.sh")
++         actions.append("Load dashboard while logged in during fixture days (seeds snapshots).")
++     if not by_id.get("F8_clv_sample", {}).get("pass"):
++-        actions.append("Wait for matchdays + daily pred-log-sync; do not scale stakes until n≥25.")
+++        actions.append(
+++            "Run pred-log-sync after FT (HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 for WC rows without best_bet); "
+++            "need n≥25 before scaling stakes."
+++        )
++     if not since:
++         actions.append("Set HIBS_EVIDENCE_DEPLOY_DATE in .env (or deploy via link_production.sh for .deploy-revision).")
++     if not actions:
++diff --git a/src/hibs_predictor/prediction_log.py b/src/hibs_predictor/prediction_log.py
++index 3ea7998..7e14a1d 100644
++--- a/src/hibs_predictor/prediction_log.py
+++++ b/src/hibs_predictor/prediction_log.py
++@@ -4,7 +4,8 @@ Persistent prediction audit trail + post-match result join for calibration / ROI
++ Enabled by default (set HIBS_PREDICTION_LOG_ENABLED=0 to disable). After each fixture bundle
++ build, log_predictions_from_fixtures runs when HIBS_PREDICTION_LOG_ALWAYS=1 (default on).
++ CLV: HIBS_CLV_LOG_ENABLED=1 (default when log on) stores opening
++-1X2 + best-bet odds at capture; pred-log-sync joins closing 1X2 from API-Football fixture odds
+++1X2 + stake-side odds at capture (value bet, or predicted_outcome when
+++HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1); pred-log-sync joins closing 1X2 from API-Football fixture odds
++ when available and computes clv_pp (stake implied vs close, percentage points).
++ All logging is best-effort and must never break predictions.
++ """
++@@ -20,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
++ 
++ from dotenv import load_dotenv
++ 
+++_BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+++_DEFAULT_DB = os.path.join(_BASE, "data", "prediction_audit.sqlite")
+++
+++
++ def _db_path() -> str:
++     load_dotenv()
++-    from hibs_predictor.project_paths import resolve_data_path
++-
++-    return str(resolve_data_path("HIBS_PREDICTION_LOG_DB", "data/prediction_audit.sqlite"))
+++    return os.getenv("HIBS_PREDICTION_LOG_DB", _DEFAULT_DB)
++ 
++ 
++ def _enabled() -> bool:
++@@ -59,6 +62,53 @@ def _clv_enabled() -> bool:
++     return raw not in ("0", "false", "no", "off")
++ 
++ 
+++def _clv_predicted_outcome_fallback_enabled() -> bool:
+++    """When on, CLV uses model 1X2 pick when no value-bet (best_bet) is flagged — needed for tight WC lines."""
+++    load_dotenv()
+++    raw = (os.getenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK") or "1").strip().lower()
+++    return raw not in ("0", "false", "no", "off")
+++
+++
+++def _normalize_1x2_outcome(raw: Any) -> Optional[str]:
+++    if raw is None:
+++        return None
+++    oc = str(raw).strip().lower()
+++    return oc if oc in ("home", "draw", "away") else None
+++
+++
+++def _resolve_clv_stake_outcome(prediction: Dict[str, Any]) -> Tuple[Optional[str], str]:
+++    """Return (stake side, source) for CLV: value bet first, else predicted_outcome when fallback on."""
+++    best = _normalize_1x2_outcome(prediction.get("best_bet"))
+++    if best:
+++        return best, "best_bet"
+++    if _clv_predicted_outcome_fallback_enabled():
+++        pred = _normalize_1x2_outcome(prediction.get("predicted_outcome"))
+++        if pred:
+++            return pred, "predicted_outcome"
+++    return None, ""
+++
+++
+++def _stake_open_odds(
+++    stake_outcome: Optional[str],
+++    opening: Dict[str, Optional[float]],
+++    *,
+++    best_bet: Any = None,
+++    best_bet_odds: Any = None,
+++) -> Optional[float]:
+++    if not stake_outcome:
+++        return None
+++    if _normalize_1x2_outcome(best_bet) == stake_outcome and best_bet_odds is not None:
+++        try:
+++            o = float(best_bet_odds)
+++            if o > 1.0:
+++                return o
+++        except (TypeError, ValueError):
+++            pass
+++    if isinstance(opening, dict):
+++        return _decimal_odds_side(opening.get(stake_outcome))
+++    return None
+++
+++
++ def _min_interval_sec() -> int:
++     try:
++         return max(0, int(os.getenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "3600")))
++@@ -388,17 +438,56 @@ def _clv_opening_capture(fixture: Dict[str, Any], prediction: Dict[str, Any]) ->
++             best_odds = float(o) if o is not None and float(o) > 1.0 else None
++         except (TypeError, ValueError):
++             best_odds = None
+++    stake_outcome, stake_source = _resolve_clv_stake_outcome(prediction)
+++    stake_odds = _stake_open_odds(
+++        stake_outcome,
+++        opening,
+++        best_bet=best,
+++        best_bet_odds=best_odds,
+++    )
++     return {
++         "opening_odds_1x2": opening,
++         "best_bet_outcome": best,
++         "best_bet_odds": best_odds,
++         "best_bet_edge_pct": (best_row or {}).get("edge_pct") if isinstance(best_row, dict) else None,
+++        "clv_stake_outcome": stake_outcome,
+++        "clv_stake_source": stake_source or None,
+++        "clv_stake_odds": stake_odds,
++         "odds_cross_max_implied_diff_pct": float(fixture.get("odds_cross_max_implied_diff_pct") or 0.0),
++         "closing_odds_1x2": None,
++         "clv_pp": None,
++     }
++ 
++ 
+++def _ensure_clv_stake_fields(
+++    clv: Dict[str, Any],
+++    prediction: Dict[str, Any],
+++    *,
+++    fixture: Optional[Dict[str, Any]] = None,
+++) -> Dict[str, Any]:
+++    """Backfill clv_stake_* on historic rows captured before predicted-outcome fallback existed."""
+++    if not isinstance(clv, dict):
+++        return clv
+++    stake, source = _resolve_clv_stake_outcome(prediction)
+++    if not stake:
+++        return clv
+++    if not clv.get("clv_stake_outcome"):
+++        clv["clv_stake_outcome"] = stake
+++        clv["clv_stake_source"] = source or None
+++    opening = clv.get("opening_odds_1x2")
+++    if not isinstance(opening, dict) or not any(opening.get(s) for s in ("home", "draw", "away")):
+++        opening = _opening_1x2_odds(fixture or {}, prediction)
+++        clv["opening_odds_1x2"] = opening
+++    if clv.get("clv_stake_odds") is None:
+++        clv["clv_stake_odds"] = _stake_open_odds(
+++            clv.get("clv_stake_outcome") or stake,
+++            opening if isinstance(opening, dict) else {},
+++            best_bet=prediction.get("best_bet"),
+++            best_bet_odds=clv.get("best_bet_odds"),
+++        )
+++    return clv
+++
+++
++ def _resolve_data_quality_pct(fixture: Dict[str, Any], prediction: Optional[Dict[str, Any]] = None) -> float:
++     """Persist non-zero data_quality_pct on historic rows (fixture → prediction → recompute)."""
++     for src in (fixture, prediction or {}):
++@@ -741,8 +830,12 @@ def _apply_clv_to_enrich_summary(
++         return enrich
++     opening = clv.get("opening_odds_1x2") or {}
++     clv["closing_odds_1x2"] = closing
++-    outcome = clv.get("best_bet_outcome")
++-    open_odds = clv.get("best_bet_odds")
+++    outcome = _normalize_1x2_outcome(clv.get("clv_stake_outcome")) or _normalize_1x2_outcome(
+++        clv.get("best_bet_outcome")
+++    )
+++    open_odds = clv.get("clv_stake_odds")
+++    if open_odds is None:
+++        open_odds = clv.get("best_bet_odds")
++     if open_odds is None and outcome:
++         open_odds = (opening or {}).get(str(outcome))
++     close_side = closing.get(str(outcome)) if outcome else None
++@@ -753,6 +846,160 @@ def _apply_clv_to_enrich_summary(
++     return enrich
++ 
++ 
+++def _apply_clv_closing_to_fixture_snapshots(
+++    conn: sqlite3.Connection,
+++    *,
+++    api_fixture_id: int,
+++    stored_fixture_id: Any,
+++    closing: Dict[str, Optional[float]],
+++) -> int:
+++    """Join closing 1X2 and compute clv_pp for all snapshot rows on a fixture."""
+++    snap_rows = conn.execute(
+++        """
+++        SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
+++        WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
+++        """,
+++        (api_fixture_id, int(stored_fixture_id)),
+++    ).fetchall()
+++    updated = 0
+++    for sr in snap_rows:
+++        try:
+++            enrich = json.loads(sr["enrich_summary_json"])
+++        except Exception:
+++            continue
+++        if not isinstance(enrich, dict):
+++            continue
+++        try:
+++            pred = json.loads(sr["prediction_json"] or "{}")
+++        except Exception:
+++            pred = {}
+++        if not isinstance(pred, dict):
+++            pred = {}
+++        if "clv" not in enrich and enrich.get("odds_available") and pred:
+++            enrich["clv"] = _clv_opening_capture({}, pred)
+++        if "clv" not in enrich:
+++            continue
+++        enrich["clv"] = _ensure_clv_stake_fields(enrich["clv"], pred)
+++        before = (enrich.get("clv") or {}).get("clv_pp")
+++        enrich = _apply_clv_to_enrich_summary(enrich, closing)
+++        after = (enrich.get("clv") or {}).get("clv_pp")
+++        if after is None and before is None:
+++            continue
+++        conn.execute(
+++            "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
+++            (json.dumps(enrich, default=str), sr["id"]),
+++        )
+++        if after is not None:
+++            updated += 1
+++    if updated:
+++        conn.commit()
+++    return updated
+++
+++
+++def _fixture_needs_clv_backfill(conn: sqlite3.Connection, fixture_id: Any) -> bool:
+++    """True when a scored fixture has snapshots missing parseable clv_pp."""
+++    rows = conn.execute(
+++        """
+++        SELECT enrich_summary_json, prediction_json
+++        FROM prediction_snapshots
+++        WHERE fixture_id = ?
+++          AND result_outcome IS NOT NULL AND result_outcome != ''
+++        LIMIT 8
+++        """,
+++        (int(fixture_id),),
+++    ).fetchall()
+++    for enrich_raw, pred_raw in rows:
+++        try:
+++            enrich = json.loads(enrich_raw or "{}")
+++        except Exception:
+++            enrich = {}
+++        try:
+++            pred = json.loads(pred_raw or "{}")
+++        except Exception:
+++            pred = {}
+++        if not isinstance(pred, dict):
+++            continue
+++        stake, _ = _resolve_clv_stake_outcome(pred)
+++        if not stake:
+++            continue
+++        clv = enrich.get("clv") if isinstance(enrich, dict) else None
+++        if not isinstance(clv, dict):
+++            if isinstance(enrich, dict) and enrich.get("odds_available"):
+++                return True
+++            continue
+++        if clv.get("clv_pp") is None:
+++            return True
+++    return False
+++
+++
+++def backfill_clv_closing_for_scored(
+++    fetch_fixture_fn: Any,
+++    *,
+++    fetch_odds_fn: Any,
+++    fetch_by_league_fn: Any = None,
+++    fetch_by_date_fn: Any = None,
+++    max_fixtures: int = 400,
+++) -> Dict[str, Any]:
+++    """
+++    Join closing 1X2 for fixtures already scored but missing clv_pp (e.g. WC rows with best_bet=None).
+++
+++    Safe to run after every pred-log-sync — only polls fixtures that still need CLV.
+++    """
+++    out: Dict[str, Any] = {
+++        "clv_backfill_fixtures": 0,
+++        "clv_rows_updated": 0,
+++        "clv_backfill_skipped": 0,
+++    }
+++    if not _clv_enabled() or fetch_odds_fn is None or not os.path.isfile(_db_path()):
+++        return out
+++    init_db()
+++    conn = sqlite3.connect(_db_path(), timeout=20)
+++    conn.row_factory = sqlite3.Row
+++    try:
+++        groups = conn.execute(
+++            """
+++            SELECT fixture_id, MIN(kickoff_iso) AS kickoff_iso,
+++                   MAX(home_name) AS home_name, MAX(away_name) AS away_name,
+++                   MAX(league_code) AS league_code
+++            FROM prediction_snapshots
+++            WHERE result_outcome IS NOT NULL AND result_outcome != ''
+++            GROUP BY fixture_id
+++            ORDER BY MIN(kickoff_iso) DESC
+++            LIMIT ?
+++            """,
+++            (int(max_fixtures),),
+++        ).fetchall()
+++        for r in groups:
+++            if not _fixture_needs_clv_backfill(conn, r["fixture_id"]):
+++                out["clv_backfill_skipped"] += 1
+++                continue
+++            fid_int, raw, note = _resolve_api_fixture_id(
+++                r,
+++                fetch_fixture_fn=fetch_fixture_fn,
+++                fetch_by_league_fn=fetch_by_league_fn,
+++                fetch_by_date_fn=fetch_by_date_fn,
+++            )
+++            if fid_int is None:
+++                continue
+++            try:
+++                odds_raw = fetch_odds_fn(fid_int)
+++                closing = parse_closing_1x2_from_odds_response(odds_raw)
+++            except Exception:
+++                closing = {"home": None, "draw": None, "away": None}
+++            n = _apply_clv_closing_to_fixture_snapshots(
+++                conn,
+++                api_fixture_id=fid_int,
+++                stored_fixture_id=r["fixture_id"],
+++                closing=closing,
+++            )
+++            if n:
+++                out["clv_backfill_fixtures"] += 1
+++                out["clv_rows_updated"] += n
+++    finally:
+++        conn.close()
+++    return out
+++
+++
++ def _kickoff_date_str(kickoff_iso: str) -> Optional[str]:
++     ko = _parse_kickoff_iso(kickoff_iso)
++     if ko is None:
++@@ -1003,37 +1250,24 @@ def sync_finished_results(
++                     except Exception:
++                         pass
++                     closing = {"home": None, "draw": None, "away": None}
++-                snap_rows = conn.execute(
++-                    """
++-                    SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
++-                    WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
++-                    """,
++-                    (fid_int, int(r["fixture_id"])),
++-                ).fetchall()
++-                for sr in snap_rows:
++-                    try:
++-                        enrich = json.loads(sr["enrich_summary_json"])
++-                    except Exception:
++-                        continue
++-                    if not isinstance(enrich, dict):
++-                        continue
++-                    if "clv" not in enrich and enrich.get("odds_available"):
++-                        try:
++-                            pred = json.loads(sr["prediction_json"] or "{}")
++-                        except Exception:
++-                            pred = {}
++-                        if isinstance(pred, dict) and pred:
++-                            enrich["clv"] = _clv_opening_capture({}, pred)
++-                    if "clv" not in enrich:
++-                        continue
++-                    enrich = _apply_clv_to_enrich_summary(enrich, closing)
++-                    conn.execute(
++-                        "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
++-                        (json.dumps(enrich, default=str), sr["id"]),
++-                    )
++-                conn.commit()
+++                _apply_clv_closing_to_fixture_snapshots(
+++                    conn,
+++                    api_fixture_id=fid_int,
+++                    stored_fixture_id=r["fixture_id"],
+++                    closing=closing,
+++                )
++     finally:
++         conn.close()
+++    if _clv_enabled() and fetch_odds_fn is not None:
+++        bf = backfill_clv_closing_for_scored(
+++            fetch_fixture_fn,
+++            fetch_odds_fn=fetch_odds_fn,
+++            fetch_by_league_fn=fetch_by_league_fn,
+++            fetch_by_date_fn=fetch_by_date_fn,
+++            max_fixtures=int(max_fixtures),
+++        )
+++        stats["clv_backfill_fixtures"] = int(bf.get("clv_backfill_fixtures") or 0)
+++        stats["clv_rows_updated"] = int(bf.get("clv_rows_updated") or 0)
++     stats["updated"] = int(updated)
++     scored = conn_row_count_scored() if updated else None
++     if scored is not None:
++@@ -1043,7 +1277,9 @@ def sync_finished_results(
++             f"Updated {updated} snapshot row(s); "
++             f"pending groups {stats['pending_fixture_groups']}; "
++             f"resolved_by_teams {stats['resolved_by_teams']}; "
++-            f"unresolved {stats['unresolved_fixture']}"
+++            f"unresolved {stats['unresolved_fixture']}; "
+++            f"clv_backfill {stats.get('clv_backfill_fixtures', 0)} fixture(s), "
+++            f"{stats.get('clv_rows_updated', 0)} row(s)"
++         )
++     return stats
++ 
++@@ -1881,8 +2117,14 @@ def clv_beat_close_summary(*, days: int = 28, since_iso: str | None = None) -> D
++             FROM prediction_snapshots
++             WHERE result_outcome IS NOT NULL AND result_outcome != ''
++               AND kickoff_iso >= ?
+++              AND id IN (
+++                SELECT MAX(id) FROM prediction_snapshots
+++                WHERE result_outcome IS NOT NULL AND result_outcome != ''
+++                  AND kickoff_iso >= ?
+++                GROUP BY fixture_id
+++              )
++             """,
++-            (cutoff,),
+++            (cutoff, cutoff),
++         ).fetchall()
++     finally:
++         conn.close()
++diff --git a/tests/test_prediction_log_clv_institutional.py b/tests/test_prediction_log_clv_institutional.py
++index ff03f65..caa03ac 100644
++--- a/tests/test_prediction_log_clv_institutional.py
+++++ b/tests/test_prediction_log_clv_institutional.py
++@@ -3,10 +3,134 @@
++ from __future__ import annotations
++ 
++ import json
+++import sqlite3
++ 
++ import pytest
++ 
++ 
+++def test_clv_predicted_outcome_fallback_when_no_best_bet(monkeypatch):
+++    from hibs_predictor.prediction_log import _clv_opening_capture
+++
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    prediction = {
+++        "predicted_outcome": "home",
+++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 3.8},
+++        "best_bet": None,
+++        "value_bets": {},
+++    }
+++    clv = _clv_opening_capture({}, prediction)
+++    assert clv["clv_stake_outcome"] == "home"
+++    assert clv["clv_stake_source"] == "predicted_outcome"
+++    assert clv["clv_stake_odds"] == 2.1
+++
+++
+++def test_clv_prefers_best_bet_over_predicted_outcome(monkeypatch):
+++    from hibs_predictor.prediction_log import _clv_opening_capture
+++
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    prediction = {
+++        "predicted_outcome": "draw",
+++        "best_bet": "away",
+++        "value_bets": {"away": {"odds": 4.5, "edge_pct": 6.0}},
+++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 4.5},
+++    }
+++    clv = _clv_opening_capture({}, prediction)
+++    assert clv["clv_stake_outcome"] == "away"
+++    assert clv["clv_stake_source"] == "best_bet"
+++
+++
+++def test_backfill_clv_on_scored_row_without_best_bet(monkeypatch, tmp_path):
+++    from hibs_predictor.prediction_log import (
+++        backfill_clv_closing_for_scored,
+++        clv_beat_close_summary,
+++        init_db,
+++    )
+++
+++    db = tmp_path / "audit.sqlite"
+++    monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
+++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
+++    monkeypatch.setenv("HIBS_CLV_LOG_ENABLED", "1")
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    init_db()
+++    enrich = {
+++        "odds_available": True,
+++        "clv": {
+++            "opening_odds_1x2": {"home": 2.0, "draw": 3.5, "away": 4.0},
+++            "best_bet_outcome": None,
+++            "best_bet_odds": None,
+++            "closing_odds_1x2": None,
+++            "clv_pp": None,
+++        },
+++    }
+++    pred = {
+++        "predicted_outcome": "home",
+++        "probabilities": {"home": 0.55, "draw": 0.25, "away": 0.20},
+++        "bookmaker_odds": {"home": 2.0, "draw": 3.5, "away": 4.0},
+++        "best_bet": None,
+++    }
+++    conn = sqlite3.connect(str(db))
+++    for fid in (8801, 8801):
+++        conn.execute(
+++            """
+++            INSERT INTO prediction_snapshots (
+++                captured_at, fixture_id, league_code, kickoff_iso, home_name, away_name,
+++                one_x2_mode, xg_source, data_quality_pct, prediction_json, enrich_summary_json,
+++                result_home, result_away, result_outcome, result_status, result_recorded_at
+++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+++            """,
+++            (
+++                "2026-06-11T12:00:00+00:00",
+++                fid,
+++                "WORLD_CUP",
+++                "2026-06-11T19:00:00+00:00",
+++                "Mexico",
+++                "South Africa",
+++                "ensemble",
+++                "api",
+++                85.0,
+++                json.dumps(pred),
+++                json.dumps(enrich),
+++                1,
+++                0,
+++                "home",
+++                "FT",
+++                "2026-06-11T22:00:00+00:00",
+++            ),
+++        )
+++    conn.commit()
+++    conn.close()
+++
+++    def fetch_fixture(_fid):
+++        return {"fixture": {"status": {"short": "FT"}}, "goals": {"home": 1, "away": 0}}
+++
+++    def fetch_odds(_fid):
+++        return [
+++            {
+++                "bookmakers": [
+++                    {
+++                        "bets": [
+++                            {
+++                                "name": "Match Winner",
+++                                "values": [
+++                                    {"value": "Home", "odd": "1.85"},
+++                                    {"value": "Draw", "odd": "3.6"},
+++                                    {"value": "Away", "odd": "4.2"},
+++                                ],
+++                            }
+++                        ]
+++                    }
+++                ]
+++            }
+++        ]
+++
+++    out = backfill_clv_closing_for_scored(fetch_fixture, fetch_odds_fn=fetch_odds)
+++    assert out["clv_backfill_fixtures"] == 1
+++    assert out["clv_rows_updated"] >= 1
+++
+++    summary = clv_beat_close_summary(days=28, since_iso="2026-06-11T00:00:00+00:00")
+++    assert summary["n_clv_rows"] == 1
+++
+++
++ def test_opening_1x2_from_line_odds_and_fixture():
++     from hibs_predictor.prediction_log import _clv_opening_capture, _opening_1x2_odds
++ 
++-- 
++2.43.0
++
+diff --git a/patches/wc-clv-f8.patch b/patches/wc-clv-f8.patch
+new file mode 100644
+index 0000000..58f06d2
+--- /dev/null
++++ b/patches/wc-clv-f8.patch
+@@ -0,0 +1,669 @@
++From 135b2107349bb25c6fbeedd3a0804a24c28ff9c3 Mon Sep 17 00:00:00 2001
++From: Cursor Agent <cursor-agent@users.noreply.github.com>
++Date: Sat, 13 Jun 2026 11:08:11 +0000
++Subject: [PATCH] CLV: predicted_outcome fallback + scored backfill for WC F8
++ (inst++ evidence)
++
++- HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 (default): CLV on model pick when best_bet is null
++- backfill_clv_closing_for_scored() after pred-log-sync for already-FT audit rows
++- clv_beat_close_summary dedupes one row per fixture_id
++- scripts/diagnose_wc_clv.py for WC row inspection
++- Forward evidence F8 next_action mentions WC CLV path
++---
++ .env.example                                  |   2 +
++ scripts/diagnose_wc_clv.py                    |  66 ++++
++ src/hibs_predictor/forward_evidence.py        |   5 +-
++ src/hibs_predictor/prediction_log.py          | 316 ++++++++++++++++--
++ .../test_prediction_log_clv_institutional.py  | 124 +++++++
++ 5 files changed, 475 insertions(+), 38 deletions(-)
++ create mode 100644 scripts/diagnose_wc_clv.py
++
++diff --git a/.env.example b/.env.example
++index fc16c7e..55f3834 100644
++--- a/.env.example
+++++ b/.env.example
++@@ -167,6 +167,7 @@ ODDS_API_KEY=your_odds_api_key_here
++ # HIBS_PRED_LOG_SYNC_AUTO=1       — auto-settle FT results after each bundle build (throttled, default on)
++ # HIBS_PRED_LOG_SYNC_AUTO_MIN_SEC=1800
++ # HIBS_CLV_LOG_ENABLED=1
+++# HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1   — CLV on model 1X2 pick when no value bet (WC / tight lines)
++ #
++ # When APIs are blocked or thin, supplemental HTTP layers in (see scrapers/source_registry.py + HIBS_ENABLE_* below).
++ # Respect robots.txt, rate limits, and site terms; scrapers enrich data — they are not a full fixture calendar.
++@@ -275,6 +276,7 @@ STATS_API_KEY=your_stats_api_key_here
++ # HIBS_PREDICTION_LOG_RETAIN_DAYS=365
++ # With prediction log on: store opening 1X2 + best-bet odds in enrich_summary_json for CLV (default on).
++ # HIBS_CLV_LOG_ENABLED=1
+++# HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1   — CLV on model 1X2 pick when no value bet (WC / tight lines)
++ # Audit odds capture (P0 — value replay / CLV need 1X2 in prediction_json):
++ # HIBS_AUDIT_ODDS_RETRY=1         — one Odds API + API-Football bundle fetch before snapshot insert
++ # HIBS_AUDIT_REQUIRE_ODDS=1       — daily cron skips fixtures still missing 1X2 after retry (Brier rows from dashboard may still log)
++diff --git a/scripts/diagnose_wc_clv.py b/scripts/diagnose_wc_clv.py
++new file mode 100644
++index 0000000..4f685b9
++--- /dev/null
+++++ b/scripts/diagnose_wc_clv.py
++@@ -0,0 +1,66 @@
+++#!/usr/bin/env python3
+++"""Diagnose WORLD_CUP audit rows vs forward CLV (F8) requirements."""
+++from __future__ import annotations
+++
+++import json
+++import sqlite3
+++import sys
+++from pathlib import Path
+++
+++ROOT = Path(__file__).resolve().parents[1]
+++sys.path.insert(0, str(ROOT / "src"))
+++
+++from hibs_predictor.forward_evidence import evidence_deploy_since_iso
+++from hibs_predictor.prediction_log import _db_path
+++
+++
+++def main() -> int:
+++    since = evidence_deploy_since_iso()
+++    conn = sqlite3.connect(_db_path())
+++    rows = conn.execute(
+++        """
+++        SELECT kickoff_iso, home_name, away_name, captured_at,
+++               result_outcome, result_recorded_at,
+++               prediction_json, enrich_summary_json
+++        FROM prediction_snapshots
+++        WHERE league_code = 'WORLD_CUP'
+++        ORDER BY kickoff_iso
+++        """
+++    ).fetchall()
+++    conn.close()
+++
+++    print("since_deploy:", since)
+++    print(f"WORLD_CUP snapshot rows: {len(rows)}\n")
+++
+++    for ko, h, a, cap, ro, rr, pj, ej in rows:
+++        post = (ko or "") >= (since or "")
+++        try:
+++            pred = json.loads(pj or "{}")
+++            best = pred.get("best_bet")
+++            has_1x2 = bool(pred.get("bookmaker_odds") or pred.get("line_odds"))
+++        except Exception:
+++            best, has_1x2 = None, False
+++        try:
+++        clv = json.loads(ej or "{}").get("clv") or {}
+++        pp = clv.get("clv_pp")
+++        stake = clv.get("clv_stake_outcome")
+++        src = clv.get("clv_stake_source")
+++    except Exception:
+++        pp = stake = src = None
+++
+++    if ro:
+++        status = "SCORED"
+++    elif rr:
+++        status = "partial"
+++    else:
+++        status = "PENDING"
+++
+++    tag = "POST" if post else "PRE"
+++    print(f"[{tag}] {status}  {ko}  {h} v {a}")
+++    print(f"      captured={cap}  1x2={has_1x2}  best_bet={best}  stake={stake}({src})  clv_pp={pp}")
+++
+++    return 0
+++
+++
+++if __name__ == "__main__":
+++    raise SystemExit(main())
++diff --git a/src/hibs_predictor/forward_evidence.py b/src/hibs_predictor/forward_evidence.py
++index 013f02f..af04cfb 100644
++--- a/src/hibs_predictor/forward_evidence.py
+++++ b/src/hibs_predictor/forward_evidence.py
++@@ -236,7 +236,10 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
++         actions.append("bash scripts/run_forward_backfill_plan.sh")
++         actions.append("Load dashboard while logged in during fixture days (seeds snapshots).")
++     if not by_id.get("F8_clv_sample", {}).get("pass"):
++-        actions.append("Wait for matchdays + daily pred-log-sync; do not scale stakes until n≥25.")
+++        actions.append(
+++            "Run pred-log-sync after FT (HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 for WC rows without best_bet); "
+++            "need n≥25 before scaling stakes."
+++        )
++     if not since:
++         actions.append("Set HIBS_EVIDENCE_DEPLOY_DATE in .env (or deploy via link_production.sh for .deploy-revision).")
++     if not actions:
++diff --git a/src/hibs_predictor/prediction_log.py b/src/hibs_predictor/prediction_log.py
++index 3ea7998..7e14a1d 100644
++--- a/src/hibs_predictor/prediction_log.py
+++++ b/src/hibs_predictor/prediction_log.py
++@@ -4,7 +4,8 @@ Persistent prediction audit trail + post-match result join for calibration / ROI
++ Enabled by default (set HIBS_PREDICTION_LOG_ENABLED=0 to disable). After each fixture bundle
++ build, log_predictions_from_fixtures runs when HIBS_PREDICTION_LOG_ALWAYS=1 (default on).
++ CLV: HIBS_CLV_LOG_ENABLED=1 (default when log on) stores opening
++-1X2 + best-bet odds at capture; pred-log-sync joins closing 1X2 from API-Football fixture odds
+++1X2 + stake-side odds at capture (value bet, or predicted_outcome when
+++HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1); pred-log-sync joins closing 1X2 from API-Football fixture odds
++ when available and computes clv_pp (stake implied vs close, percentage points).
++ All logging is best-effort and must never break predictions.
++ """
++@@ -20,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
++ 
++ from dotenv import load_dotenv
++ 
+++_BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+++_DEFAULT_DB = os.path.join(_BASE, "data", "prediction_audit.sqlite")
+++
+++
++ def _db_path() -> str:
++     load_dotenv()
++-    from hibs_predictor.project_paths import resolve_data_path
++-
++-    return str(resolve_data_path("HIBS_PREDICTION_LOG_DB", "data/prediction_audit.sqlite"))
+++    return os.getenv("HIBS_PREDICTION_LOG_DB", _DEFAULT_DB)
++ 
++ 
++ def _enabled() -> bool:
++@@ -59,6 +62,53 @@ def _clv_enabled() -> bool:
++     return raw not in ("0", "false", "no", "off")
++ 
++ 
+++def _clv_predicted_outcome_fallback_enabled() -> bool:
+++    """When on, CLV uses model 1X2 pick when no value-bet (best_bet) is flagged — needed for tight WC lines."""
+++    load_dotenv()
+++    raw = (os.getenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK") or "1").strip().lower()
+++    return raw not in ("0", "false", "no", "off")
+++
+++
+++def _normalize_1x2_outcome(raw: Any) -> Optional[str]:
+++    if raw is None:
+++        return None
+++    oc = str(raw).strip().lower()
+++    return oc if oc in ("home", "draw", "away") else None
+++
+++
+++def _resolve_clv_stake_outcome(prediction: Dict[str, Any]) -> Tuple[Optional[str], str]:
+++    """Return (stake side, source) for CLV: value bet first, else predicted_outcome when fallback on."""
+++    best = _normalize_1x2_outcome(prediction.get("best_bet"))
+++    if best:
+++        return best, "best_bet"
+++    if _clv_predicted_outcome_fallback_enabled():
+++        pred = _normalize_1x2_outcome(prediction.get("predicted_outcome"))
+++        if pred:
+++            return pred, "predicted_outcome"
+++    return None, ""
+++
+++
+++def _stake_open_odds(
+++    stake_outcome: Optional[str],
+++    opening: Dict[str, Optional[float]],
+++    *,
+++    best_bet: Any = None,
+++    best_bet_odds: Any = None,
+++) -> Optional[float]:
+++    if not stake_outcome:
+++        return None
+++    if _normalize_1x2_outcome(best_bet) == stake_outcome and best_bet_odds is not None:
+++        try:
+++            o = float(best_bet_odds)
+++            if o > 1.0:
+++                return o
+++        except (TypeError, ValueError):
+++            pass
+++    if isinstance(opening, dict):
+++        return _decimal_odds_side(opening.get(stake_outcome))
+++    return None
+++
+++
++ def _min_interval_sec() -> int:
++     try:
++         return max(0, int(os.getenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "3600")))
++@@ -388,17 +438,56 @@ def _clv_opening_capture(fixture: Dict[str, Any], prediction: Dict[str, Any]) ->
++             best_odds = float(o) if o is not None and float(o) > 1.0 else None
++         except (TypeError, ValueError):
++             best_odds = None
+++    stake_outcome, stake_source = _resolve_clv_stake_outcome(prediction)
+++    stake_odds = _stake_open_odds(
+++        stake_outcome,
+++        opening,
+++        best_bet=best,
+++        best_bet_odds=best_odds,
+++    )
++     return {
++         "opening_odds_1x2": opening,
++         "best_bet_outcome": best,
++         "best_bet_odds": best_odds,
++         "best_bet_edge_pct": (best_row or {}).get("edge_pct") if isinstance(best_row, dict) else None,
+++        "clv_stake_outcome": stake_outcome,
+++        "clv_stake_source": stake_source or None,
+++        "clv_stake_odds": stake_odds,
++         "odds_cross_max_implied_diff_pct": float(fixture.get("odds_cross_max_implied_diff_pct") or 0.0),
++         "closing_odds_1x2": None,
++         "clv_pp": None,
++     }
++ 
++ 
+++def _ensure_clv_stake_fields(
+++    clv: Dict[str, Any],
+++    prediction: Dict[str, Any],
+++    *,
+++    fixture: Optional[Dict[str, Any]] = None,
+++) -> Dict[str, Any]:
+++    """Backfill clv_stake_* on historic rows captured before predicted-outcome fallback existed."""
+++    if not isinstance(clv, dict):
+++        return clv
+++    stake, source = _resolve_clv_stake_outcome(prediction)
+++    if not stake:
+++        return clv
+++    if not clv.get("clv_stake_outcome"):
+++        clv["clv_stake_outcome"] = stake
+++        clv["clv_stake_source"] = source or None
+++    opening = clv.get("opening_odds_1x2")
+++    if not isinstance(opening, dict) or not any(opening.get(s) for s in ("home", "draw", "away")):
+++        opening = _opening_1x2_odds(fixture or {}, prediction)
+++        clv["opening_odds_1x2"] = opening
+++    if clv.get("clv_stake_odds") is None:
+++        clv["clv_stake_odds"] = _stake_open_odds(
+++            clv.get("clv_stake_outcome") or stake,
+++            opening if isinstance(opening, dict) else {},
+++            best_bet=prediction.get("best_bet"),
+++            best_bet_odds=clv.get("best_bet_odds"),
+++        )
+++    return clv
+++
+++
++ def _resolve_data_quality_pct(fixture: Dict[str, Any], prediction: Optional[Dict[str, Any]] = None) -> float:
++     """Persist non-zero data_quality_pct on historic rows (fixture → prediction → recompute)."""
++     for src in (fixture, prediction or {}):
++@@ -741,8 +830,12 @@ def _apply_clv_to_enrich_summary(
++         return enrich
++     opening = clv.get("opening_odds_1x2") or {}
++     clv["closing_odds_1x2"] = closing
++-    outcome = clv.get("best_bet_outcome")
++-    open_odds = clv.get("best_bet_odds")
+++    outcome = _normalize_1x2_outcome(clv.get("clv_stake_outcome")) or _normalize_1x2_outcome(
+++        clv.get("best_bet_outcome")
+++    )
+++    open_odds = clv.get("clv_stake_odds")
+++    if open_odds is None:
+++        open_odds = clv.get("best_bet_odds")
++     if open_odds is None and outcome:
++         open_odds = (opening or {}).get(str(outcome))
++     close_side = closing.get(str(outcome)) if outcome else None
++@@ -753,6 +846,160 @@ def _apply_clv_to_enrich_summary(
++     return enrich
++ 
++ 
+++def _apply_clv_closing_to_fixture_snapshots(
+++    conn: sqlite3.Connection,
+++    *,
+++    api_fixture_id: int,
+++    stored_fixture_id: Any,
+++    closing: Dict[str, Optional[float]],
+++) -> int:
+++    """Join closing 1X2 and compute clv_pp for all snapshot rows on a fixture."""
+++    snap_rows = conn.execute(
+++        """
+++        SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
+++        WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
+++        """,
+++        (api_fixture_id, int(stored_fixture_id)),
+++    ).fetchall()
+++    updated = 0
+++    for sr in snap_rows:
+++        try:
+++            enrich = json.loads(sr["enrich_summary_json"])
+++        except Exception:
+++            continue
+++        if not isinstance(enrich, dict):
+++            continue
+++        try:
+++            pred = json.loads(sr["prediction_json"] or "{}")
+++        except Exception:
+++            pred = {}
+++        if not isinstance(pred, dict):
+++            pred = {}
+++        if "clv" not in enrich and enrich.get("odds_available") and pred:
+++            enrich["clv"] = _clv_opening_capture({}, pred)
+++        if "clv" not in enrich:
+++            continue
+++        enrich["clv"] = _ensure_clv_stake_fields(enrich["clv"], pred)
+++        before = (enrich.get("clv") or {}).get("clv_pp")
+++        enrich = _apply_clv_to_enrich_summary(enrich, closing)
+++        after = (enrich.get("clv") or {}).get("clv_pp")
+++        if after is None and before is None:
+++            continue
+++        conn.execute(
+++            "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
+++            (json.dumps(enrich, default=str), sr["id"]),
+++        )
+++        if after is not None:
+++            updated += 1
+++    if updated:
+++        conn.commit()
+++    return updated
+++
+++
+++def _fixture_needs_clv_backfill(conn: sqlite3.Connection, fixture_id: Any) -> bool:
+++    """True when a scored fixture has snapshots missing parseable clv_pp."""
+++    rows = conn.execute(
+++        """
+++        SELECT enrich_summary_json, prediction_json
+++        FROM prediction_snapshots
+++        WHERE fixture_id = ?
+++          AND result_outcome IS NOT NULL AND result_outcome != ''
+++        LIMIT 8
+++        """,
+++        (int(fixture_id),),
+++    ).fetchall()
+++    for enrich_raw, pred_raw in rows:
+++        try:
+++            enrich = json.loads(enrich_raw or "{}")
+++        except Exception:
+++            enrich = {}
+++        try:
+++            pred = json.loads(pred_raw or "{}")
+++        except Exception:
+++            pred = {}
+++        if not isinstance(pred, dict):
+++            continue
+++        stake, _ = _resolve_clv_stake_outcome(pred)
+++        if not stake:
+++            continue
+++        clv = enrich.get("clv") if isinstance(enrich, dict) else None
+++        if not isinstance(clv, dict):
+++            if isinstance(enrich, dict) and enrich.get("odds_available"):
+++                return True
+++            continue
+++        if clv.get("clv_pp") is None:
+++            return True
+++    return False
+++
+++
+++def backfill_clv_closing_for_scored(
+++    fetch_fixture_fn: Any,
+++    *,
+++    fetch_odds_fn: Any,
+++    fetch_by_league_fn: Any = None,
+++    fetch_by_date_fn: Any = None,
+++    max_fixtures: int = 400,
+++) -> Dict[str, Any]:
+++    """
+++    Join closing 1X2 for fixtures already scored but missing clv_pp (e.g. WC rows with best_bet=None).
+++
+++    Safe to run after every pred-log-sync — only polls fixtures that still need CLV.
+++    """
+++    out: Dict[str, Any] = {
+++        "clv_backfill_fixtures": 0,
+++        "clv_rows_updated": 0,
+++        "clv_backfill_skipped": 0,
+++    }
+++    if not _clv_enabled() or fetch_odds_fn is None or not os.path.isfile(_db_path()):
+++        return out
+++    init_db()
+++    conn = sqlite3.connect(_db_path(), timeout=20)
+++    conn.row_factory = sqlite3.Row
+++    try:
+++        groups = conn.execute(
+++            """
+++            SELECT fixture_id, MIN(kickoff_iso) AS kickoff_iso,
+++                   MAX(home_name) AS home_name, MAX(away_name) AS away_name,
+++                   MAX(league_code) AS league_code
+++            FROM prediction_snapshots
+++            WHERE result_outcome IS NOT NULL AND result_outcome != ''
+++            GROUP BY fixture_id
+++            ORDER BY MIN(kickoff_iso) DESC
+++            LIMIT ?
+++            """,
+++            (int(max_fixtures),),
+++        ).fetchall()
+++        for r in groups:
+++            if not _fixture_needs_clv_backfill(conn, r["fixture_id"]):
+++                out["clv_backfill_skipped"] += 1
+++                continue
+++            fid_int, raw, note = _resolve_api_fixture_id(
+++                r,
+++                fetch_fixture_fn=fetch_fixture_fn,
+++                fetch_by_league_fn=fetch_by_league_fn,
+++                fetch_by_date_fn=fetch_by_date_fn,
+++            )
+++            if fid_int is None:
+++                continue
+++            try:
+++                odds_raw = fetch_odds_fn(fid_int)
+++                closing = parse_closing_1x2_from_odds_response(odds_raw)
+++            except Exception:
+++                closing = {"home": None, "draw": None, "away": None}
+++            n = _apply_clv_closing_to_fixture_snapshots(
+++                conn,
+++                api_fixture_id=fid_int,
+++                stored_fixture_id=r["fixture_id"],
+++                closing=closing,
+++            )
+++            if n:
+++                out["clv_backfill_fixtures"] += 1
+++                out["clv_rows_updated"] += n
+++    finally:
+++        conn.close()
+++    return out
+++
+++
++ def _kickoff_date_str(kickoff_iso: str) -> Optional[str]:
++     ko = _parse_kickoff_iso(kickoff_iso)
++     if ko is None:
++@@ -1003,37 +1250,24 @@ def sync_finished_results(
++                     except Exception:
++                         pass
++                     closing = {"home": None, "draw": None, "away": None}
++-                snap_rows = conn.execute(
++-                    """
++-                    SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
++-                    WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
++-                    """,
++-                    (fid_int, int(r["fixture_id"])),
++-                ).fetchall()
++-                for sr in snap_rows:
++-                    try:
++-                        enrich = json.loads(sr["enrich_summary_json"])
++-                    except Exception:
++-                        continue
++-                    if not isinstance(enrich, dict):
++-                        continue
++-                    if "clv" not in enrich and enrich.get("odds_available"):
++-                        try:
++-                            pred = json.loads(sr["prediction_json"] or "{}")
++-                        except Exception:
++-                            pred = {}
++-                        if isinstance(pred, dict) and pred:
++-                            enrich["clv"] = _clv_opening_capture({}, pred)
++-                    if "clv" not in enrich:
++-                        continue
++-                    enrich = _apply_clv_to_enrich_summary(enrich, closing)
++-                    conn.execute(
++-                        "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
++-                        (json.dumps(enrich, default=str), sr["id"]),
++-                    )
++-                conn.commit()
+++                _apply_clv_closing_to_fixture_snapshots(
+++                    conn,
+++                    api_fixture_id=fid_int,
+++                    stored_fixture_id=r["fixture_id"],
+++                    closing=closing,
+++                )
++     finally:
++         conn.close()
+++    if _clv_enabled() and fetch_odds_fn is not None:
+++        bf = backfill_clv_closing_for_scored(
+++            fetch_fixture_fn,
+++            fetch_odds_fn=fetch_odds_fn,
+++            fetch_by_league_fn=fetch_by_league_fn,
+++            fetch_by_date_fn=fetch_by_date_fn,
+++            max_fixtures=int(max_fixtures),
+++        )
+++        stats["clv_backfill_fixtures"] = int(bf.get("clv_backfill_fixtures") or 0)
+++        stats["clv_rows_updated"] = int(bf.get("clv_rows_updated") or 0)
++     stats["updated"] = int(updated)
++     scored = conn_row_count_scored() if updated else None
++     if scored is not None:
++@@ -1043,7 +1277,9 @@ def sync_finished_results(
++             f"Updated {updated} snapshot row(s); "
++             f"pending groups {stats['pending_fixture_groups']}; "
++             f"resolved_by_teams {stats['resolved_by_teams']}; "
++-            f"unresolved {stats['unresolved_fixture']}"
+++            f"unresolved {stats['unresolved_fixture']}; "
+++            f"clv_backfill {stats.get('clv_backfill_fixtures', 0)} fixture(s), "
+++            f"{stats.get('clv_rows_updated', 0)} row(s)"
++         )
++     return stats
++ 
++@@ -1881,8 +2117,14 @@ def clv_beat_close_summary(*, days: int = 28, since_iso: str | None = None) -> D
++             FROM prediction_snapshots
++             WHERE result_outcome IS NOT NULL AND result_outcome != ''
++               AND kickoff_iso >= ?
+++              AND id IN (
+++                SELECT MAX(id) FROM prediction_snapshots
+++                WHERE result_outcome IS NOT NULL AND result_outcome != ''
+++                  AND kickoff_iso >= ?
+++                GROUP BY fixture_id
+++              )
++             """,
++-            (cutoff,),
+++            (cutoff, cutoff),
++         ).fetchall()
++     finally:
++         conn.close()
++diff --git a/tests/test_prediction_log_clv_institutional.py b/tests/test_prediction_log_clv_institutional.py
++index ff03f65..caa03ac 100644
++--- a/tests/test_prediction_log_clv_institutional.py
+++++ b/tests/test_prediction_log_clv_institutional.py
++@@ -3,10 +3,134 @@
++ from __future__ import annotations
++ 
++ import json
+++import sqlite3
++ 
++ import pytest
++ 
++ 
+++def test_clv_predicted_outcome_fallback_when_no_best_bet(monkeypatch):
+++    from hibs_predictor.prediction_log import _clv_opening_capture
+++
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    prediction = {
+++        "predicted_outcome": "home",
+++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 3.8},
+++        "best_bet": None,
+++        "value_bets": {},
+++    }
+++    clv = _clv_opening_capture({}, prediction)
+++    assert clv["clv_stake_outcome"] == "home"
+++    assert clv["clv_stake_source"] == "predicted_outcome"
+++    assert clv["clv_stake_odds"] == 2.1
+++
+++
+++def test_clv_prefers_best_bet_over_predicted_outcome(monkeypatch):
+++    from hibs_predictor.prediction_log import _clv_opening_capture
+++
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    prediction = {
+++        "predicted_outcome": "draw",
+++        "best_bet": "away",
+++        "value_bets": {"away": {"odds": 4.5, "edge_pct": 6.0}},
+++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 4.5},
+++    }
+++    clv = _clv_opening_capture({}, prediction)
+++    assert clv["clv_stake_outcome"] == "away"
+++    assert clv["clv_stake_source"] == "best_bet"
+++
+++
+++def test_backfill_clv_on_scored_row_without_best_bet(monkeypatch, tmp_path):
+++    from hibs_predictor.prediction_log import (
+++        backfill_clv_closing_for_scored,
+++        clv_beat_close_summary,
+++        init_db,
+++    )
+++
+++    db = tmp_path / "audit.sqlite"
+++    monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
+++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
+++    monkeypatch.setenv("HIBS_CLV_LOG_ENABLED", "1")
+++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
+++    init_db()
+++    enrich = {
+++        "odds_available": True,
+++        "clv": {
+++            "opening_odds_1x2": {"home": 2.0, "draw": 3.5, "away": 4.0},
+++            "best_bet_outcome": None,
+++            "best_bet_odds": None,
+++            "closing_odds_1x2": None,
+++            "clv_pp": None,
+++        },
+++    }
+++    pred = {
+++        "predicted_outcome": "home",
+++        "probabilities": {"home": 0.55, "draw": 0.25, "away": 0.20},
+++        "bookmaker_odds": {"home": 2.0, "draw": 3.5, "away": 4.0},
+++        "best_bet": None,
+++    }
+++    conn = sqlite3.connect(str(db))
+++    for fid in (8801, 8801):
+++        conn.execute(
+++            """
+++            INSERT INTO prediction_snapshots (
+++                captured_at, fixture_id, league_code, kickoff_iso, home_name, away_name,
+++                one_x2_mode, xg_source, data_quality_pct, prediction_json, enrich_summary_json,
+++                result_home, result_away, result_outcome, result_status, result_recorded_at
+++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+++            """,
+++            (
+++                "2026-06-11T12:00:00+00:00",
+++                fid,
+++                "WORLD_CUP",
+++                "2026-06-11T19:00:00+00:00",
+++                "Mexico",
+++                "South Africa",
+++                "ensemble",
+++                "api",
+++                85.0,
+++                json.dumps(pred),
+++                json.dumps(enrich),
+++                1,
+++                0,
+++                "home",
+++                "FT",
+++                "2026-06-11T22:00:00+00:00",
+++            ),
+++        )
+++    conn.commit()
+++    conn.close()
+++
+++    def fetch_fixture(_fid):
+++        return {"fixture": {"status": {"short": "FT"}}, "goals": {"home": 1, "away": 0}}
+++
+++    def fetch_odds(_fid):
+++        return [
+++            {
+++                "bookmakers": [
+++                    {
+++                        "bets": [
+++                            {
+++                                "name": "Match Winner",
+++                                "values": [
+++                                    {"value": "Home", "odd": "1.85"},
+++                                    {"value": "Draw", "odd": "3.6"},
+++                                    {"value": "Away", "odd": "4.2"},
+++                                ],
+++                            }
+++                        ]
+++                    }
+++                ]
+++            }
+++        ]
+++
+++    out = backfill_clv_closing_for_scored(fetch_fixture, fetch_odds_fn=fetch_odds)
+++    assert out["clv_backfill_fixtures"] == 1
+++    assert out["clv_rows_updated"] >= 1
+++
+++    summary = clv_beat_close_summary(days=28, since_iso="2026-06-11T00:00:00+00:00")
+++    assert summary["n_clv_rows"] == 1
+++
+++
++ def test_opening_1x2_from_line_odds_and_fixture():
++     from hibs_predictor.prediction_log import _clv_opening_capture, _opening_1x2_odds
++ 
++-- 
++2.43.0
++
+diff --git a/scripts/diagnose_wc_clv.py b/scripts/diagnose_wc_clv.py
+new file mode 100644
+index 0000000..4f685b9
+--- /dev/null
++++ b/scripts/diagnose_wc_clv.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python3
++"""Diagnose WORLD_CUP audit rows vs forward CLV (F8) requirements."""
++from __future__ import annotations
++
++import json
++import sqlite3
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "src"))
++
++from hibs_predictor.forward_evidence import evidence_deploy_since_iso
++from hibs_predictor.prediction_log import _db_path
++
++
++def main() -> int:
++    since = evidence_deploy_since_iso()
++    conn = sqlite3.connect(_db_path())
++    rows = conn.execute(
++        """
++        SELECT kickoff_iso, home_name, away_name, captured_at,
++               result_outcome, result_recorded_at,
++               prediction_json, enrich_summary_json
++        FROM prediction_snapshots
++        WHERE league_code = 'WORLD_CUP'
++        ORDER BY kickoff_iso
++        """
++    ).fetchall()
++    conn.close()
++
++    print("since_deploy:", since)
++    print(f"WORLD_CUP snapshot rows: {len(rows)}\n")
++
++    for ko, h, a, cap, ro, rr, pj, ej in rows:
++        post = (ko or "") >= (since or "")
++        try:
++            pred = json.loads(pj or "{}")
++            best = pred.get("best_bet")
++            has_1x2 = bool(pred.get("bookmaker_odds") or pred.get("line_odds"))
++        except Exception:
++            best, has_1x2 = None, False
++        try:
++        clv = json.loads(ej or "{}").get("clv") or {}
++        pp = clv.get("clv_pp")
++        stake = clv.get("clv_stake_outcome")
++        src = clv.get("clv_stake_source")
++    except Exception:
++        pp = stake = src = None
++
++    if ro:
++        status = "SCORED"
++    elif rr:
++        status = "partial"
++    else:
++        status = "PENDING"
++
++    tag = "POST" if post else "PRE"
++    print(f"[{tag}] {status}  {ko}  {h} v {a}")
++    print(f"      captured={cap}  1x2={has_1x2}  best_bet={best}  stake={stake}({src})  clv_pp={pp}")
++
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/install_wc_clv_f8.sh b/scripts/install_wc_clv_f8.sh
+new file mode 100755
+index 0000000..0eb9238
+--- /dev/null
++++ b/scripts/install_wc_clv_f8.sh
+@@ -0,0 +1,123 @@
++#!/usr/bin/env bash
++# Apply WC / inst++ CLV fix (predicted_outcome fallback + scored backfill) on VPS or Mac checkout.
++#
++#   sudo bash /opt/hibs-bet/scripts/install_wc_clv_f8.sh
++#   cd ~/hibs-bet && ./scripts/install_wc_clv_f8.sh
++#
++# Idempotent — exits 0 if fix already present.
++set -euo pipefail
++
++APP="${DEPLOY_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
++cd "${APP}"
++RAW="${HIBS_BET_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/hibs-bet/cursor/wc-clv-predicted-outcome-fallback-c4a1}"
++RAW_FALLBACK="${HIBS_BET_RAW_FALLBACK:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/patches/hibs-bet}"
++PATCH_LOCAL="${APP}/patches/wc-clv-f8-core.patch"
++PATCH_LOCAL_FULL="${APP}/patches/wc-clv-f8.patch"
++PY="${APP}/.venv/bin/python3"
++[[ -x "${PY}" ]] || PY=python3
++
++log() { echo "[wc-clv-f8] $*"; }
++warn() { echo "[wc-clv-f8] WARN: $*" >&2; }
++
++already_applied() {
++  grep -q 'clv_predicted_outcome_fallback' "${APP}/src/hibs_predictor/prediction_log.py" 2>/dev/null
++}
++
++ensure_env() {
++  touch "${APP}/.env"
++  for kv in \
++    HIBS_CLV_LOG_ENABLED=1 \
++    HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 \
++    HIBS_PREDICTION_LOG_ENABLED=1; do
++    k="${kv%%=*}"
++    if grep -q "^${k}=" "${APP}/.env" 2>/dev/null; then
++      if [[ "${k}" == "HIBS_CLV_PREDICTED_OUTCOME_FALLBACK" ]]; then
++        sed -i 's/^HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=.*/HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1/' "${APP}/.env" 2>/dev/null || true
++      fi
++    else
++      echo "${kv}" >>"${APP}/.env"
++    fi
++  done
++  chown www-data:www-data "${APP}/.env" 2>/dev/null || true
++}
++
++apply_patch() {
++  local patch_file="$1"
++  log "applying ${patch_file}"
++  if git -C "${APP}" rev-parse --git-dir >/dev/null 2>&1; then
++    git -C "${APP}" apply --3way "${patch_file}" 2>/dev/null && return 0
++  fi
++  patch -p1 --forward <"${patch_file}" || true
++  find "${APP}" -name '*.rej' -delete 2>/dev/null || true
++}
++
++fetch_patch() {
++  local dest="$1"
++  mkdir -p "$(dirname "${dest}")"
++  if [[ -f "${PATCH_LOCAL}" ]]; then
++    cp "${PATCH_LOCAL}" "${dest}"
++    return 0
++  fi
++  if [[ -f "${PATCH_LOCAL_FULL}" ]]; then
++    cp "${PATCH_LOCAL_FULL}" "${dest}"
++    return 0
++  fi
++  if curl -fsSL "${RAW}/patches/wc-clv-f8-core.patch" -o "${dest}" 2>/dev/null; then
++    return 0
++  fi
++  if curl -fsSL "${RAW_FALLBACK}/wc-clv-f8-core.patch" -o "${dest}" 2>/dev/null; then
++    return 0
++  fi
++  if curl -fsSL "${RAW}/patches/wc-clv-f8.patch" -o "${dest}" 2>/dev/null; then
++    return 0
++  fi
++  curl -fsSL "${RAW_FALLBACK}/wc-clv-f8.patch" -o "${dest}"
++}
++
++run_sync() {
++  if [[ -x "${PY}" ]] || command -v python3 >/dev/null 2>&1; then
++    log "pred-log-sync (CLV backfill on scored fixtures)"
++    export PYTHONPATH="${APP}/src${PYTHONPATH:+:$PYTHONPATH}"
++    set -a
++    # shellcheck disable=SC1091
++    [[ -f "${APP}/.env" ]] && source "${APP}/.env"
++    set +a
++    "${PY}" -m hibs_predictor.main pred-log-sync --verbose --min-after-kickoff-hours 0 || \
++      warn "pred-log-sync failed — rerun after next FT batch"
++  fi
++}
++
++verify() {
++  local n
++  n="$(grep -c 'clv_predicted_outcome_fallback' "${APP}/src/hibs_predictor/prediction_log.py" || true)"
++  if [[ "${n}" -lt 2 ]]; then
++    echo "ERROR: CLV fix not detected in prediction_log.py (grep count=${n})" >&2
++    exit 1
++  fi
++  log "code check OK (grep count=${n})"
++  if [[ -f "${APP}/scripts/verify_football_evidence_gates.sh" ]]; then
++    log "forward evidence gates"
++    bash "${APP}/scripts/verify_football_evidence_gates.sh" || true
++  fi
++}
++
++main() {
++  if already_applied; then
++    log "CLV predicted_outcome fallback already installed"
++    ensure_env
++    run_sync
++    verify
++    exit 0
++  fi
++
++  tmp="$(mktemp)"
++  trap 'rm -f "${tmp}"' EXIT
++  fetch_patch "${tmp}"
++  apply_patch "${tmp}"
++  ensure_env
++  run_sync
++  verify
++  log "done — F8 should climb as WC fixtures finish (need n≥25 for buyer_ready)"
++}
++
++main "$@"
 diff --git a/scripts/institutional_vps_watchdog.sh b/scripts/institutional_vps_watchdog.sh
-index 29705f5..0e49b70 100755
+index 3fe3df8..0e49b70 100755
 --- a/scripts/institutional_vps_watchdog.sh
 +++ b/scripts/institutional_vps_watchdog.sh
-@@ -66,6 +66,11 @@ repair_infra() {
-     fi
+@@ -47,7 +47,8 @@ repair_infra() {
+   for kv in \
+     HIBS_PRODUCTION=1 \
+     HIBS_PREDICTION_LOG_ENABLED=1 \
+-    HIBS_CLV_LOG_ENABLED=1; do
++    HIBS_CLV_LOG_ENABLED=1 \
++    HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1; do
+     k="${kv%%=*}"
+     grep -q "^${k}=" "${APP}/.env" 2>/dev/null || echo "${kv}" >>"${APP}/.env"
+   done
+@@ -56,6 +57,20 @@ repair_infra() {
    fi
+   chown www-data:www-data "${APP}/.env" 2>/dev/null || true
  
++  if ! grep -q 'clv_predicted_outcome_fallback' "${APP}/src/hibs_predictor/prediction_log.py" 2>/dev/null; then
++    if [[ -f "${APP}/scripts/install_wc_clv_f8.sh" ]]; then
++      log "repair: apply WC CLV fix (F8 predicted_outcome fallback)"
++      bash "${APP}/scripts/install_wc_clv_f8.sh" || warn "install_wc_clv_f8 failed — push branch or run script manually"
++    else
++      warn "WC CLV fix missing — run scripts/install_wc_clv_f8.sh after git pull"
++    fi
++  fi
++
 +  if [[ -f "${APP}/scripts/wire_product_toggles.sh" ]]; then
 +    log "repair: wire product toggles (racing + trading cross-links)"
 +    bash "${APP}/scripts/wire_product_toggles.sh" || warn "wire_product_toggles failed"
@@ -47,12 +2402,28 @@ index 29705f5..0e49b70 100755
    log "repair: reinstall ops crons if missing"
    if [[ -f "${APP}/deploy/cron-hibs-ops-automation.sh" ]]; then
      bash "${APP}/deploy/cron-hibs-ops-automation.sh" --install || true
+diff --git a/scripts/lib_deploy_host.sh b/scripts/lib_deploy_host.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/patch_racing_insights_production.sh b/scripts/patch_racing_insights_production.sh
+index 46547c0..5cc8844 100755
+--- a/scripts/patch_racing_insights_production.sh
++++ b/scripts/patch_racing_insights_production.sh
+@@ -9,7 +9,7 @@ BET="${HIBS_BET_DEPLOY_PATH:-/opt/hibs-bet}"
+ RAW="${HIBS_BET_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/hibs-bet/main}"
+ 
+ mkdir -p "${BET}/deploy"
+-for f in racing_production_guards.py racing_nav_prefix_fix.js racing_flask_prefix_snippet.py patch_racing_web_production.py; do
++for f in racing_production_guards.py racing_nav_prefix_fix.js racing_flask_prefix_snippet.py patch_racing_web_production.py product_switcher_inject.py; do
+   curl -fsSL "${RAW}/deploy/${f}" -o "${BET}/deploy/${f}"
+ done
+ 
 diff --git a/scripts/wire_product_toggles.sh b/scripts/wire_product_toggles.sh
 new file mode 100755
-index 0000000..3cafa69
+index 0000000..cbf8c28
 --- /dev/null
 +++ b/scripts/wire_product_toggles.sh
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,70 @@
 +#!/usr/bin/env bash
 +# Wire football ↔ racing ↔ trading product toggles on VPS (cross-link .env + restart).
 +#
@@ -79,9 +2450,14 @@ index 0000000..3cafa69
 +log() { echo "[product-toggle] $*"; }
 +
 +touch "${APP}/.env"
-+for kv in HIBS_PRODUCTION=1 HIBS_HEALTH_STACK_PROBE=1; do
++for kv in HIBS_PRODUCTION=1 HIBS_HEALTH_STACK_PROBE=1 HIBS_RACING_BASE_URL=/racing HIBS_TRADING_STATUS_URL=/harvested-execution HIBS_PORTFOLIO_API_URL=/api/racing/portfolio/summary; do
 +  k="${kv%%=*}"
-+  grep -q "^${k}=" "${APP}/.env" 2>/dev/null || echo "${kv}" >>"${APP}/.env"
++  v="${kv#*=}"
++  if grep -q "^${k}=" "${APP}/.env" 2>/dev/null; then
++    sed -i "s|^${k}=.*|${k}=${v}|" "${APP}/.env" 2>/dev/null || true
++  else
++    echo "${kv}" >>"${APP}/.env"
++  fi
 +done
 +
 +if [[ -f "${APP}/deploy/apply-vps-site-cross-links.sh" ]]; then
@@ -118,6 +2494,22 @@ index 0000000..3cafa69
 +fi
 +
 +log "done — product bar should show green dots when stacks are live"
+diff --git a/src/hibs_predictor/forward_evidence.py b/src/hibs_predictor/forward_evidence.py
+index 013f02f..af04cfb 100644
+--- a/src/hibs_predictor/forward_evidence.py
++++ b/src/hibs_predictor/forward_evidence.py
+@@ -236,7 +236,10 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
+         actions.append("bash scripts/run_forward_backfill_plan.sh")
+         actions.append("Load dashboard while logged in during fixture days (seeds snapshots).")
+     if not by_id.get("F8_clv_sample", {}).get("pass"):
+-        actions.append("Wait for matchdays + daily pred-log-sync; do not scale stakes until n≥25.")
++        actions.append(
++            "Run pred-log-sync after FT (HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 for WC rows without best_bet); "
++            "need n≥25 before scaling stakes."
++        )
+     if not since:
+         actions.append("Set HIBS_EVIDENCE_DEPLOY_DATE in .env (or deploy via link_production.sh for .deploy-revision).")
+     if not actions:
 diff --git a/src/hibs_predictor/health_quality_narrative.py b/src/hibs_predictor/health_quality_narrative.py
 index 84912a8..7e8e9de 100644
 --- a/src/hibs_predictor/health_quality_narrative.py
@@ -154,12 +2546,411 @@ index 84912a8..7e8e9de 100644
 -            out["stack_ops"]["racing"] = {"error": str(exc)[:120]}
 +            out["stack_ops"]["racing_evidence"] = {"error": str(exc)[:120]}
      return out
+diff --git a/src/hibs_predictor/prediction_log.py b/src/hibs_predictor/prediction_log.py
+index 3ea7998..7e14a1d 100644
+--- a/src/hibs_predictor/prediction_log.py
++++ b/src/hibs_predictor/prediction_log.py
+@@ -4,7 +4,8 @@ Persistent prediction audit trail + post-match result join for calibration / ROI
+ Enabled by default (set HIBS_PREDICTION_LOG_ENABLED=0 to disable). After each fixture bundle
+ build, log_predictions_from_fixtures runs when HIBS_PREDICTION_LOG_ALWAYS=1 (default on).
+ CLV: HIBS_CLV_LOG_ENABLED=1 (default when log on) stores opening
+-1X2 + best-bet odds at capture; pred-log-sync joins closing 1X2 from API-Football fixture odds
++1X2 + stake-side odds at capture (value bet, or predicted_outcome when
++HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1); pred-log-sync joins closing 1X2 from API-Football fixture odds
+ when available and computes clv_pp (stake implied vs close, percentage points).
+ All logging is best-effort and must never break predictions.
+ """
+@@ -20,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
+ 
+ from dotenv import load_dotenv
+ 
++_BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++_DEFAULT_DB = os.path.join(_BASE, "data", "prediction_audit.sqlite")
++
++
+ def _db_path() -> str:
+     load_dotenv()
+-    from hibs_predictor.project_paths import resolve_data_path
+-
+-    return str(resolve_data_path("HIBS_PREDICTION_LOG_DB", "data/prediction_audit.sqlite"))
++    return os.getenv("HIBS_PREDICTION_LOG_DB", _DEFAULT_DB)
+ 
+ 
+ def _enabled() -> bool:
+@@ -59,6 +62,53 @@ def _clv_enabled() -> bool:
+     return raw not in ("0", "false", "no", "off")
+ 
+ 
++def _clv_predicted_outcome_fallback_enabled() -> bool:
++    """When on, CLV uses model 1X2 pick when no value-bet (best_bet) is flagged — needed for tight WC lines."""
++    load_dotenv()
++    raw = (os.getenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK") or "1").strip().lower()
++    return raw not in ("0", "false", "no", "off")
++
++
++def _normalize_1x2_outcome(raw: Any) -> Optional[str]:
++    if raw is None:
++        return None
++    oc = str(raw).strip().lower()
++    return oc if oc in ("home", "draw", "away") else None
++
++
++def _resolve_clv_stake_outcome(prediction: Dict[str, Any]) -> Tuple[Optional[str], str]:
++    """Return (stake side, source) for CLV: value bet first, else predicted_outcome when fallback on."""
++    best = _normalize_1x2_outcome(prediction.get("best_bet"))
++    if best:
++        return best, "best_bet"
++    if _clv_predicted_outcome_fallback_enabled():
++        pred = _normalize_1x2_outcome(prediction.get("predicted_outcome"))
++        if pred:
++            return pred, "predicted_outcome"
++    return None, ""
++
++
++def _stake_open_odds(
++    stake_outcome: Optional[str],
++    opening: Dict[str, Optional[float]],
++    *,
++    best_bet: Any = None,
++    best_bet_odds: Any = None,
++) -> Optional[float]:
++    if not stake_outcome:
++        return None
++    if _normalize_1x2_outcome(best_bet) == stake_outcome and best_bet_odds is not None:
++        try:
++            o = float(best_bet_odds)
++            if o > 1.0:
++                return o
++        except (TypeError, ValueError):
++            pass
++    if isinstance(opening, dict):
++        return _decimal_odds_side(opening.get(stake_outcome))
++    return None
++
++
+ def _min_interval_sec() -> int:
+     try:
+         return max(0, int(os.getenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "3600")))
+@@ -388,17 +438,56 @@ def _clv_opening_capture(fixture: Dict[str, Any], prediction: Dict[str, Any]) ->
+             best_odds = float(o) if o is not None and float(o) > 1.0 else None
+         except (TypeError, ValueError):
+             best_odds = None
++    stake_outcome, stake_source = _resolve_clv_stake_outcome(prediction)
++    stake_odds = _stake_open_odds(
++        stake_outcome,
++        opening,
++        best_bet=best,
++        best_bet_odds=best_odds,
++    )
+     return {
+         "opening_odds_1x2": opening,
+         "best_bet_outcome": best,
+         "best_bet_odds": best_odds,
+         "best_bet_edge_pct": (best_row or {}).get("edge_pct") if isinstance(best_row, dict) else None,
++        "clv_stake_outcome": stake_outcome,
++        "clv_stake_source": stake_source or None,
++        "clv_stake_odds": stake_odds,
+         "odds_cross_max_implied_diff_pct": float(fixture.get("odds_cross_max_implied_diff_pct") or 0.0),
+         "closing_odds_1x2": None,
+         "clv_pp": None,
+     }
+ 
+ 
++def _ensure_clv_stake_fields(
++    clv: Dict[str, Any],
++    prediction: Dict[str, Any],
++    *,
++    fixture: Optional[Dict[str, Any]] = None,
++) -> Dict[str, Any]:
++    """Backfill clv_stake_* on historic rows captured before predicted-outcome fallback existed."""
++    if not isinstance(clv, dict):
++        return clv
++    stake, source = _resolve_clv_stake_outcome(prediction)
++    if not stake:
++        return clv
++    if not clv.get("clv_stake_outcome"):
++        clv["clv_stake_outcome"] = stake
++        clv["clv_stake_source"] = source or None
++    opening = clv.get("opening_odds_1x2")
++    if not isinstance(opening, dict) or not any(opening.get(s) for s in ("home", "draw", "away")):
++        opening = _opening_1x2_odds(fixture or {}, prediction)
++        clv["opening_odds_1x2"] = opening
++    if clv.get("clv_stake_odds") is None:
++        clv["clv_stake_odds"] = _stake_open_odds(
++            clv.get("clv_stake_outcome") or stake,
++            opening if isinstance(opening, dict) else {},
++            best_bet=prediction.get("best_bet"),
++            best_bet_odds=clv.get("best_bet_odds"),
++        )
++    return clv
++
++
+ def _resolve_data_quality_pct(fixture: Dict[str, Any], prediction: Optional[Dict[str, Any]] = None) -> float:
+     """Persist non-zero data_quality_pct on historic rows (fixture → prediction → recompute)."""
+     for src in (fixture, prediction or {}):
+@@ -741,8 +830,12 @@ def _apply_clv_to_enrich_summary(
+         return enrich
+     opening = clv.get("opening_odds_1x2") or {}
+     clv["closing_odds_1x2"] = closing
+-    outcome = clv.get("best_bet_outcome")
+-    open_odds = clv.get("best_bet_odds")
++    outcome = _normalize_1x2_outcome(clv.get("clv_stake_outcome")) or _normalize_1x2_outcome(
++        clv.get("best_bet_outcome")
++    )
++    open_odds = clv.get("clv_stake_odds")
++    if open_odds is None:
++        open_odds = clv.get("best_bet_odds")
+     if open_odds is None and outcome:
+         open_odds = (opening or {}).get(str(outcome))
+     close_side = closing.get(str(outcome)) if outcome else None
+@@ -753,6 +846,160 @@ def _apply_clv_to_enrich_summary(
+     return enrich
+ 
+ 
++def _apply_clv_closing_to_fixture_snapshots(
++    conn: sqlite3.Connection,
++    *,
++    api_fixture_id: int,
++    stored_fixture_id: Any,
++    closing: Dict[str, Optional[float]],
++) -> int:
++    """Join closing 1X2 and compute clv_pp for all snapshot rows on a fixture."""
++    snap_rows = conn.execute(
++        """
++        SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
++        WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
++        """,
++        (api_fixture_id, int(stored_fixture_id)),
++    ).fetchall()
++    updated = 0
++    for sr in snap_rows:
++        try:
++            enrich = json.loads(sr["enrich_summary_json"])
++        except Exception:
++            continue
++        if not isinstance(enrich, dict):
++            continue
++        try:
++            pred = json.loads(sr["prediction_json"] or "{}")
++        except Exception:
++            pred = {}
++        if not isinstance(pred, dict):
++            pred = {}
++        if "clv" not in enrich and enrich.get("odds_available") and pred:
++            enrich["clv"] = _clv_opening_capture({}, pred)
++        if "clv" not in enrich:
++            continue
++        enrich["clv"] = _ensure_clv_stake_fields(enrich["clv"], pred)
++        before = (enrich.get("clv") or {}).get("clv_pp")
++        enrich = _apply_clv_to_enrich_summary(enrich, closing)
++        after = (enrich.get("clv") or {}).get("clv_pp")
++        if after is None and before is None:
++            continue
++        conn.execute(
++            "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
++            (json.dumps(enrich, default=str), sr["id"]),
++        )
++        if after is not None:
++            updated += 1
++    if updated:
++        conn.commit()
++    return updated
++
++
++def _fixture_needs_clv_backfill(conn: sqlite3.Connection, fixture_id: Any) -> bool:
++    """True when a scored fixture has snapshots missing parseable clv_pp."""
++    rows = conn.execute(
++        """
++        SELECT enrich_summary_json, prediction_json
++        FROM prediction_snapshots
++        WHERE fixture_id = ?
++          AND result_outcome IS NOT NULL AND result_outcome != ''
++        LIMIT 8
++        """,
++        (int(fixture_id),),
++    ).fetchall()
++    for enrich_raw, pred_raw in rows:
++        try:
++            enrich = json.loads(enrich_raw or "{}")
++        except Exception:
++            enrich = {}
++        try:
++            pred = json.loads(pred_raw or "{}")
++        except Exception:
++            pred = {}
++        if not isinstance(pred, dict):
++            continue
++        stake, _ = _resolve_clv_stake_outcome(pred)
++        if not stake:
++            continue
++        clv = enrich.get("clv") if isinstance(enrich, dict) else None
++        if not isinstance(clv, dict):
++            if isinstance(enrich, dict) and enrich.get("odds_available"):
++                return True
++            continue
++        if clv.get("clv_pp") is None:
++            return True
++    return False
++
++
++def backfill_clv_closing_for_scored(
++    fetch_fixture_fn: Any,
++    *,
++    fetch_odds_fn: Any,
++    fetch_by_league_fn: Any = None,
++    fetch_by_date_fn: Any = None,
++    max_fixtures: int = 400,
++) -> Dict[str, Any]:
++    """
++    Join closing 1X2 for fixtures already scored but missing clv_pp (e.g. WC rows with best_bet=None).
++
++    Safe to run after every pred-log-sync — only polls fixtures that still need CLV.
++    """
++    out: Dict[str, Any] = {
++        "clv_backfill_fixtures": 0,
++        "clv_rows_updated": 0,
++        "clv_backfill_skipped": 0,
++    }
++    if not _clv_enabled() or fetch_odds_fn is None or not os.path.isfile(_db_path()):
++        return out
++    init_db()
++    conn = sqlite3.connect(_db_path(), timeout=20)
++    conn.row_factory = sqlite3.Row
++    try:
++        groups = conn.execute(
++            """
++            SELECT fixture_id, MIN(kickoff_iso) AS kickoff_iso,
++                   MAX(home_name) AS home_name, MAX(away_name) AS away_name,
++                   MAX(league_code) AS league_code
++            FROM prediction_snapshots
++            WHERE result_outcome IS NOT NULL AND result_outcome != ''
++            GROUP BY fixture_id
++            ORDER BY MIN(kickoff_iso) DESC
++            LIMIT ?
++            """,
++            (int(max_fixtures),),
++        ).fetchall()
++        for r in groups:
++            if not _fixture_needs_clv_backfill(conn, r["fixture_id"]):
++                out["clv_backfill_skipped"] += 1
++                continue
++            fid_int, raw, note = _resolve_api_fixture_id(
++                r,
++                fetch_fixture_fn=fetch_fixture_fn,
++                fetch_by_league_fn=fetch_by_league_fn,
++                fetch_by_date_fn=fetch_by_date_fn,
++            )
++            if fid_int is None:
++                continue
++            try:
++                odds_raw = fetch_odds_fn(fid_int)
++                closing = parse_closing_1x2_from_odds_response(odds_raw)
++            except Exception:
++                closing = {"home": None, "draw": None, "away": None}
++            n = _apply_clv_closing_to_fixture_snapshots(
++                conn,
++                api_fixture_id=fid_int,
++                stored_fixture_id=r["fixture_id"],
++                closing=closing,
++            )
++            if n:
++                out["clv_backfill_fixtures"] += 1
++                out["clv_rows_updated"] += n
++    finally:
++        conn.close()
++    return out
++
++
+ def _kickoff_date_str(kickoff_iso: str) -> Optional[str]:
+     ko = _parse_kickoff_iso(kickoff_iso)
+     if ko is None:
+@@ -1003,37 +1250,24 @@ def sync_finished_results(
+                     except Exception:
+                         pass
+                     closing = {"home": None, "draw": None, "away": None}
+-                snap_rows = conn.execute(
+-                    """
+-                    SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
+-                    WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
+-                    """,
+-                    (fid_int, int(r["fixture_id"])),
+-                ).fetchall()
+-                for sr in snap_rows:
+-                    try:
+-                        enrich = json.loads(sr["enrich_summary_json"])
+-                    except Exception:
+-                        continue
+-                    if not isinstance(enrich, dict):
+-                        continue
+-                    if "clv" not in enrich and enrich.get("odds_available"):
+-                        try:
+-                            pred = json.loads(sr["prediction_json"] or "{}")
+-                        except Exception:
+-                            pred = {}
+-                        if isinstance(pred, dict) and pred:
+-                            enrich["clv"] = _clv_opening_capture({}, pred)
+-                    if "clv" not in enrich:
+-                        continue
+-                    enrich = _apply_clv_to_enrich_summary(enrich, closing)
+-                    conn.execute(
+-                        "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
+-                        (json.dumps(enrich, default=str), sr["id"]),
+-                    )
+-                conn.commit()
++                _apply_clv_closing_to_fixture_snapshots(
++                    conn,
++                    api_fixture_id=fid_int,
++                    stored_fixture_id=r["fixture_id"],
++                    closing=closing,
++                )
+     finally:
+         conn.close()
++    if _clv_enabled() and fetch_odds_fn is not None:
++        bf = backfill_clv_closing_for_scored(
++            fetch_fixture_fn,
++            fetch_odds_fn=fetch_odds_fn,
++            fetch_by_league_fn=fetch_by_league_fn,
++            fetch_by_date_fn=fetch_by_date_fn,
++            max_fixtures=int(max_fixtures),
++        )
++        stats["clv_backfill_fixtures"] = int(bf.get("clv_backfill_fixtures") or 0)
++        stats["clv_rows_updated"] = int(bf.get("clv_rows_updated") or 0)
+     stats["updated"] = int(updated)
+     scored = conn_row_count_scored() if updated else None
+     if scored is not None:
+@@ -1043,7 +1277,9 @@ def sync_finished_results(
+             f"Updated {updated} snapshot row(s); "
+             f"pending groups {stats['pending_fixture_groups']}; "
+             f"resolved_by_teams {stats['resolved_by_teams']}; "
+-            f"unresolved {stats['unresolved_fixture']}"
++            f"unresolved {stats['unresolved_fixture']}; "
++            f"clv_backfill {stats.get('clv_backfill_fixtures', 0)} fixture(s), "
++            f"{stats.get('clv_rows_updated', 0)} row(s)"
+         )
+     return stats
+ 
+@@ -1881,8 +2117,14 @@ def clv_beat_close_summary(*, days: int = 28, since_iso: str | None = None) -> D
+             FROM prediction_snapshots
+             WHERE result_outcome IS NOT NULL AND result_outcome != ''
+               AND kickoff_iso >= ?
++              AND id IN (
++                SELECT MAX(id) FROM prediction_snapshots
++                WHERE result_outcome IS NOT NULL AND result_outcome != ''
++                  AND kickoff_iso >= ?
++                GROUP BY fixture_id
++              )
+             """,
+-            (cutoff,),
++            (cutoff, cutoff),
+         ).fetchall()
+     finally:
+         conn.close()
 diff --git a/src/hibs_predictor/product_links.py b/src/hibs_predictor/product_links.py
 new file mode 100644
-index 0000000..f1094a0
+index 0000000..537b67f
 --- /dev/null
 +++ b/src/hibs_predictor/product_links.py
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,79 @@
 +"""Cross-product navigation URLs (football · racing · trading) for the product bar."""
 +
 +from __future__ import annotations
@@ -190,30 +2981,32 @@ index 0000000..f1094a0
 +
 +
 +def racing_base_url() -> str:
++    """Racing entry — relative /racing works on unified hibs-bet.co.uk nginx."""
 +    explicit = (os.getenv("HIBS_RACING_BASE_URL") or "").strip().rstrip("/")
 +    if explicit:
 +        return explicit
-+    if production_mode():
-+        return f"{football_production_url()}/racing"
-+    return "http://127.0.0.1:5003"
++    return "/racing"
++
++
++def racing_cards_url() -> str:
++    base = racing_base_url()
++    if base.startswith("/"):
++        return f"{base}/cards" if not base.endswith("/cards") else base
++    return f"{base}/cards"
 +
 +
 +def trading_status_url() -> str:
 +    explicit = (os.getenv("HIBS_TRADING_STATUS_URL") or "").strip().rstrip("/")
 +    if explicit:
 +        return explicit
-+    if production_mode():
-+        return f"{football_production_url()}/harvested-execution"
-+    return "http://127.0.0.1:9110/"
++    return "/harvested-execution"
 +
 +
 +def portfolio_api_url() -> str:
 +    explicit = (os.getenv("HIBS_PORTFOLIO_API_URL") or "").strip()
 +    if explicit:
 +        return explicit
-+    if production_mode():
-+        return "/api/racing/portfolio/summary"
-+    return "http://127.0.0.1:5003/api/portfolio/summary"
++    return "/api/racing/portfolio/summary"
 +
 +
 +def product_active_from_env(default: str = "football") -> str:
@@ -228,10 +3021,11 @@ index 0000000..f1094a0
 +    return {
 +        "hibs_football_home_url": football_home_url(),
 +        "hibs_racing_base_url": racing,
++        "hibs_racing_cards_url": racing_cards_url(),
 +        "hibs_trading_status_url": trading_status_url(),
 +        "hibs_product_active": active_product,
 +        "portfolio_api_url": portfolio_api_url(),
-+        "portfolio_racing_url": f"{racing}/portfolio",
++        "portfolio_racing_url": f"{racing}/portfolio" if not racing.endswith("/portfolio") else racing,
 +        "portfolio_football_url": "/tracker",
 +        "trading_metrics_url": (os.getenv("TRADING_METRICS_URL") or "http://127.0.0.1:9109").rstrip("/"),
 +        "hibs_stack_probe_enabled": production_mode() or _env_truthy("HIBS_HEALTH_STACK_PROBE"),
@@ -542,7 +3336,7 @@ index 0000000..d09c200
 +    global.HibsProductStacks = { apply: applyStackOps, poll: poll };
 +})(typeof window !== 'undefined' ? window : global);
 diff --git a/templates/_product_switcher.html b/templates/_product_switcher.html
-index 1d76b1d..34fc232 100644
+index 1d76b1d..dff779b 100644
 --- a/templates/_product_switcher.html
 +++ b/templates/_product_switcher.html
 @@ -12,6 +12,14 @@
@@ -560,14 +3354,18 @@ index 1d76b1d..34fc232 100644
  .hibs-harvested-logo-link{display:inline-flex;align-items:center;line-height:0;flex-shrink:0;}
  .hibs-harvested-logo,.hibs-header-logo{height:56px;width:auto;max-width:min(420px,58vw);object-fit:contain;filter:drop-shadow(0 2px 12px rgba(0,0,0,0.35));}
  .hibs-product-bar .hibs-harvested-logo{height:64px;max-width:min(480px,62vw);}
-@@ -30,11 +38,14 @@
+@@ -28,13 +36,16 @@
+     <div class="hibs-product-switch">
+         <a href="{{ hibs_football_home_url|default('/') }}"
             class="hibs-product-pill {% if hibs_product_active == 'football' %}active{% endif %}">⚽ Football</a>
-         <a href="{{ hibs_racing_base_url }}/cards"
+-        <a href="{{ hibs_racing_base_url }}/cards"
++        <a href="{{ hibs_racing_cards_url|default(hibs_racing_base_url ~ '/cards') }}"
             class="hibs-product-pill {% if hibs_product_active == 'racing' %}active{% endif %}"
 -           rel="noopener">🏇 Racing</a>
+-        <a href="{{ hibs_trading_status_url|default('http://127.0.0.1:9110/') }}"
 +           rel="noopener" data-stack-pill="racing" title="Racing cards & insights">
 +           🏇 Racing<span class="hibs-stack-dot" id="hibs-stack-racing" aria-hidden="true"></span></a>
-         <a href="{{ hibs_trading_status_url|default('http://127.0.0.1:9110/') }}"
++        <a href="{{ hibs_trading_status_url|default('/harvested-execution') }}"
             class="hibs-product-pill {% if hibs_product_active == 'trading' %}active{% endif %}"
 -           rel="noopener" title="Harvested Execution — paper metrics">📈 Trading</a>
 +           rel="noopener" data-stack-pill="trading" title="Harvested Execution — paper metrics">
@@ -614,9 +3412,148 @@ index 26fcfef..a19dbd5 100644
  
      <div class="head">
          <div>
+diff --git a/tests/test_prediction_log_clv_institutional.py b/tests/test_prediction_log_clv_institutional.py
+index ff03f65..caa03ac 100644
+--- a/tests/test_prediction_log_clv_institutional.py
++++ b/tests/test_prediction_log_clv_institutional.py
+@@ -3,10 +3,134 @@
+ from __future__ import annotations
+ 
+ import json
++import sqlite3
+ 
+ import pytest
+ 
+ 
++def test_clv_predicted_outcome_fallback_when_no_best_bet(monkeypatch):
++    from hibs_predictor.prediction_log import _clv_opening_capture
++
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    prediction = {
++        "predicted_outcome": "home",
++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 3.8},
++        "best_bet": None,
++        "value_bets": {},
++    }
++    clv = _clv_opening_capture({}, prediction)
++    assert clv["clv_stake_outcome"] == "home"
++    assert clv["clv_stake_source"] == "predicted_outcome"
++    assert clv["clv_stake_odds"] == 2.1
++
++
++def test_clv_prefers_best_bet_over_predicted_outcome(monkeypatch):
++    from hibs_predictor.prediction_log import _clv_opening_capture
++
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    prediction = {
++        "predicted_outcome": "draw",
++        "best_bet": "away",
++        "value_bets": {"away": {"odds": 4.5, "edge_pct": 6.0}},
++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 4.5},
++    }
++    clv = _clv_opening_capture({}, prediction)
++    assert clv["clv_stake_outcome"] == "away"
++    assert clv["clv_stake_source"] == "best_bet"
++
++
++def test_backfill_clv_on_scored_row_without_best_bet(monkeypatch, tmp_path):
++    from hibs_predictor.prediction_log import (
++        backfill_clv_closing_for_scored,
++        clv_beat_close_summary,
++        init_db,
++    )
++
++    db = tmp_path / "audit.sqlite"
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
++    monkeypatch.setenv("HIBS_CLV_LOG_ENABLED", "1")
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    init_db()
++    enrich = {
++        "odds_available": True,
++        "clv": {
++            "opening_odds_1x2": {"home": 2.0, "draw": 3.5, "away": 4.0},
++            "best_bet_outcome": None,
++            "best_bet_odds": None,
++            "closing_odds_1x2": None,
++            "clv_pp": None,
++        },
++    }
++    pred = {
++        "predicted_outcome": "home",
++        "probabilities": {"home": 0.55, "draw": 0.25, "away": 0.20},
++        "bookmaker_odds": {"home": 2.0, "draw": 3.5, "away": 4.0},
++        "best_bet": None,
++    }
++    conn = sqlite3.connect(str(db))
++    for fid in (8801, 8801):
++        conn.execute(
++            """
++            INSERT INTO prediction_snapshots (
++                captured_at, fixture_id, league_code, kickoff_iso, home_name, away_name,
++                one_x2_mode, xg_source, data_quality_pct, prediction_json, enrich_summary_json,
++                result_home, result_away, result_outcome, result_status, result_recorded_at
++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
++            """,
++            (
++                "2026-06-11T12:00:00+00:00",
++                fid,
++                "WORLD_CUP",
++                "2026-06-11T19:00:00+00:00",
++                "Mexico",
++                "South Africa",
++                "ensemble",
++                "api",
++                85.0,
++                json.dumps(pred),
++                json.dumps(enrich),
++                1,
++                0,
++                "home",
++                "FT",
++                "2026-06-11T22:00:00+00:00",
++            ),
++        )
++    conn.commit()
++    conn.close()
++
++    def fetch_fixture(_fid):
++        return {"fixture": {"status": {"short": "FT"}}, "goals": {"home": 1, "away": 0}}
++
++    def fetch_odds(_fid):
++        return [
++            {
++                "bookmakers": [
++                    {
++                        "bets": [
++                            {
++                                "name": "Match Winner",
++                                "values": [
++                                    {"value": "Home", "odd": "1.85"},
++                                    {"value": "Draw", "odd": "3.6"},
++                                    {"value": "Away", "odd": "4.2"},
++                                ],
++                            }
++                        ]
++                    }
++                ]
++            }
++        ]
++
++    out = backfill_clv_closing_for_scored(fetch_fixture, fetch_odds_fn=fetch_odds)
++    assert out["clv_backfill_fixtures"] == 1
++    assert out["clv_rows_updated"] >= 1
++
++    summary = clv_beat_close_summary(days=28, since_iso="2026-06-11T00:00:00+00:00")
++    assert summary["n_clv_rows"] == 1
++
++
+ def test_opening_1x2_from_line_odds_and_fixture():
+     from hibs_predictor.prediction_log import _clv_opening_capture, _opening_1x2_odds
+ 
 diff --git a/tests/test_product_links.py b/tests/test_product_links.py
 new file mode 100644
-index 0000000..b95ea14
+index 0000000..017e935
 --- /dev/null
 +++ b/tests/test_product_links.py
 @@ -0,0 +1,43 @@
@@ -624,45 +3561,93 @@ index 0000000..b95ea14
 +
 +from __future__ import annotations
 +
-+import pytest
-+
 +from hibs_predictor.product_links import (
 +    football_home_url,
 +    portfolio_api_url,
 +    product_bar_context,
 +    racing_base_url,
++    racing_cards_url,
 +    trading_status_url,
 +)
 +
 +
-+def test_production_defaults(monkeypatch):
++def test_same_origin_defaults(monkeypatch):
 +    monkeypatch.delenv("HIBS_RACING_BASE_URL", raising=False)
 +    monkeypatch.delenv("HIBS_TRADING_STATUS_URL", raising=False)
 +    monkeypatch.delenv("HIBS_PORTFOLIO_API_URL", raising=False)
-+    monkeypatch.setenv("HIBS_PRODUCTION", "1")
-+    monkeypatch.setenv("HIBS_DOMAIN", "hibs-bet.co.uk")
-+    assert racing_base_url() == "https://hibs-bet.co.uk/racing"
-+    assert trading_status_url() == "https://hibs-bet.co.uk/harvested-execution"
++    monkeypatch.delenv("HIBS_PRODUCTION", raising=False)
++    assert racing_base_url() == "/racing"
++    assert racing_cards_url() == "/racing/cards"
++    assert trading_status_url() == "/harvested-execution"
 +    assert portfolio_api_url() == "/api/racing/portfolio/summary"
 +
 +
-+def test_dev_defaults(monkeypatch):
-+    monkeypatch.delenv("HIBS_PRODUCTION", raising=False)
-+    monkeypatch.delenv("HIBS_RACING_BASE_URL", raising=False)
-+    monkeypatch.delenv("HIBS_TRADING_STATUS_URL", raising=False)
++def test_explicit_override(monkeypatch):
++    monkeypatch.setenv("HIBS_RACING_BASE_URL", "http://127.0.0.1:5003")
++    monkeypatch.setenv("HIBS_TRADING_STATUS_URL", "http://127.0.0.1:9110")
 +    assert racing_base_url() == "http://127.0.0.1:5003"
-+    assert "127.0.0.1" in trading_status_url()
++    assert racing_cards_url() == "http://127.0.0.1:5003/cards"
++    assert trading_status_url() == "http://127.0.0.1:9110"
 +
 +
 +def test_product_bar_context_active(monkeypatch):
-+    monkeypatch.setenv("HIBS_FOOTBALL_HOME_URL", "https://hibs-bet.co.uk/")
++    monkeypatch.delenv("HIBS_RACING_BASE_URL", raising=False)
 +    ctx = product_bar_context(active="trading")
 +    assert ctx["hibs_product_active"] == "trading"
-+    assert ctx["hibs_football_home_url"].rstrip("/") == "https://hibs-bet.co.uk"
++    assert ctx["hibs_racing_cards_url"] == "/racing/cards"
++    assert ctx["hibs_trading_status_url"] == "/harvested-execution"
 +
 +
 +def test_football_home_default():
 +    assert football_home_url() == "/"
+diff --git a/tests/test_product_switcher_inject.py b/tests/test_product_switcher_inject.py
+new file mode 100644
+index 0000000..a3a440f
+--- /dev/null
++++ b/tests/test_product_switcher_inject.py
+@@ -0,0 +1,27 @@
++"""Tests for racing product switcher HTML inject."""
++
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++_DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
++if str(_DEPLOY) not in sys.path:
++    sys.path.insert(0, str(_DEPLOY))
++
++from product_switcher_inject import product_switcher_html  # noqa: E402
++
++
++def test_racing_active_links():
++    html = product_switcher_html(active="racing")
++    assert 'href="/"' in html
++    assert 'href="/racing/cards"' in html
++    assert 'href="/harvested-execution"' in html
++    assert "hibs-product-pill active" in html
++    assert html.count("hibs-product-pill active") == 1
++
++
++def test_trading_active():
++    html = product_switcher_html(active="trading")
++    assert "/harvested-execution" in html
++    assert "active" in html
+diff --git a/tests/test_racing_production_guards.py b/tests/test_racing_production_guards.py
+index 356ea3e..dafaea7 100644
+--- a/tests/test_racing_production_guards.py
++++ b/tests/test_racing_production_guards.py
+@@ -38,6 +38,10 @@ def test_production_guards_inject_nav_fix_and_hide_refresh(monkeypatch):
+     resp = app.test_client().get("/cards")
+     assert resp.status_code == 200
+     html = resp.get_data(as_text=True)
++    assert "hibs-product-bar-inject" in html
++    assert 'href="/"' in html
++    assert 'href="/racing/cards"' in html
++    assert 'href="/harvested-execution"' in html
+     assert "hibs-racing-nav-fix" in html
+     assert "__hibsRacingFetchPatched" in html
+     assert 'PREFIX + href' in html or 'rewriteHref' in html
 diff --git a/tests/test_stack_ops_probe.py b/tests/test_stack_ops_probe.py
 new file mode 100644
 index 0000000..c7facf7
@@ -701,6 +3686,3 @@ index 0000000..c7facf7
 +    augment_stack_ops(health)
 +    assert health["stack_ops"]["racing"]["online"] is True
 +    assert health["stack_ops"]["trading"]["online"] is False
--- 
-2.43.0
-
