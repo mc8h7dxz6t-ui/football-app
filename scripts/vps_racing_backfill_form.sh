@@ -15,10 +15,10 @@ RAW="${HIBS_BET_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-ap
 source "${BET}/scripts/lib_racing_vps_probe.sh"
 
 mkdir -p "${BET}/scripts"
-if [[ ! -f "${BET}/scripts/racing_backfill_ranker_form_sqlite.py" ]]; then
-  curl -fsSL "${RAW}/patches/hibs-bet/files/scripts/racing_backfill_ranker_form_sqlite.py" \
-    -o "${BET}/scripts/racing_backfill_ranker_form_sqlite.py"
-fi
+echo "==> sync racing_backfill_ranker_form_sqlite.py"
+curl -fsSL "${RAW}/patches/hibs-bet/files/scripts/racing_backfill_ranker_form_sqlite.py" \
+  -o "${BET}/scripts/racing_backfill_ranker_form_sqlite.py"
+chmod 755 "${BET}/scripts/racing_backfill_ranker_form_sqlite.py"
 
 racing_vps_repair_raceform_env "${APP}" || {
   echo "ERROR: raceform.db required at ${APP}/data/raceform.db" >&2
@@ -28,7 +28,13 @@ RF="$(racing_vps_resolve_raceform "${APP}")"
 FS="${APP}/data/feature_store.sqlite"
 [[ -f "${FS}" ]] || { echo "ERROR: missing ${FS} — run card refresh first" >&2; exit 1; }
 
-python3 "${BET}/scripts/racing_backfill_ranker_form_sqlite.py" "${FS}" --raceform "${RF}" --runs "${RUNS}"
+echo "==> backfill form (last ${RUNS} runs)"
+if python3 "${BET}/scripts/racing_backfill_ranker_form_sqlite.py" --help 2>&1 | grep -q -- '--runs'; then
+  python3 "${BET}/scripts/racing_backfill_ranker_form_sqlite.py" "${FS}" --raceform "${RF}" --runs "${RUNS}"
+else
+  echo "WARN: script missing --runs flag — using legacy backfill (still last 6 in SQL)" >&2
+  python3 "${BET}/scripts/racing_backfill_ranker_form_sqlite.py" "${FS}" --raceform "${RF}"
+fi
 
 chown www-data:www-data "${FS}" "${RF}" 2>/dev/null || true
 systemctl restart hibs-racing
