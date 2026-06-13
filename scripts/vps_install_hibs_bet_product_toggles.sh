@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# VPS: apply hibs-bet product toggle patch (racing + trading live dots).
+# VPS: wire product toggle navigation (/, /racing/cards, /harvested-execution).
 #
 #   curl -fsSL https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/scripts/vps_install_hibs_bet_product_toggles.sh | sudo bash
 set -euo pipefail
 
 APP="${DEPLOY_PATH:-/opt/hibs-bet}"
 PATCH_CORE="${HIBS_PRODUCT_PATCH_URL:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/patches/hibs-bet/product-toggle-core.patch}"
-PATCH_FULL="${HIBS_PRODUCT_PATCH_FULL_URL:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/patches/hibs-bet/product-toggle-racing-trading.patch}"
 
 log() { echo "[product-toggle] $*"; }
 
@@ -14,8 +13,8 @@ log() { echo "[product-toggle] $*"; }
 cd "${APP}"
 
 patch_applied() {
-  [[ -f "${APP}/src/hibs_predictor/product_links.py" ]] && \
-    grep -q 'augment_stack_ops' "${APP}/src/hibs_predictor/stack_ops_probe.py" 2>/dev/null && \
+  [[ -f "${APP}/deploy/product_switcher_inject.py" ]] && \
+    grep -q 'racing_cards_url' "${APP}/src/hibs_predictor/product_links.py" 2>/dev/null && \
     grep -q 'HibsProductStacks' "${APP}/static/hibs_product_stacks.js" 2>/dev/null
 }
 
@@ -32,31 +31,32 @@ apply_patch_file() {
 if ! patch_applied; then
   tmp="$(mktemp)"
   trap 'rm -f "${tmp}"' EXIT
-  log "fetching core patch (skips .env.example)"
-  if ! curl -fsSL "${PATCH_CORE}" -o "${tmp}" 2>/dev/null; then
-    log "core patch missing — trying full patch"
-    curl -fsSL "${PATCH_FULL}" -o "${tmp}"
-  fi
+  log "fetching patch"
+  curl -fsSL "${PATCH_CORE}" -o "${tmp}"
   apply_patch_file "${tmp}"
 fi
 
 if ! patch_applied; then
-  echo "ERROR: product toggle code missing — check src/hibs_predictor/product_links.py" >&2
+  echo "ERROR: product toggle code missing" >&2
   exit 1
 fi
 log "code OK"
 
-touch "${APP}/.env"
-for kv in HIBS_PRODUCTION=1 HIBS_HEALTH_STACK_PROBE=1; do
-  k="${kv%%=*}"
-  grep -q "^${k}=" "${APP}/.env" 2>/dev/null || echo "${kv}" >>"${APP}/.env"
-done
-chown www-data:www-data "${APP}/.env" 2>/dev/null || true
-
 if [[ -x "${APP}/scripts/wire_product_toggles.sh" ]]; then
   bash "${APP}/scripts/wire_product_toggles.sh"
 else
-  log "wire script missing — run: sudo bash deploy/apply-vps-site-cross-links.sh"
+  touch "${APP}/.env"
+  for kv in \
+    HIBS_PRODUCTION=1 \
+    HIBS_RACING_BASE_URL=/racing \
+    HIBS_TRADING_STATUS_URL=/harvested-execution \
+    HIBS_PORTFOLIO_API_URL=/api/racing/portfolio/summary; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    grep -q "^${k}=" "${APP}/.env" 2>/dev/null && sed -i "s|^${k}=.*|${k}=${v}|" "${APP}/.env" || echo "${kv}" >>"${APP}/.env"
+  done
+  systemctl restart hibs-bet 2>/dev/null || true
+  systemctl restart hibs-racing 2>/dev/null || true
 fi
 
-log "done — refresh hibs-bet.co.uk; green dots = racing/trading live"
+log "done — toggle: Football=/  Racing=/racing/cards  Trading=/harvested-execution"
