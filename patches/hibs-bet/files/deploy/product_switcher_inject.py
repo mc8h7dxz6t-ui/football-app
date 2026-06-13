@@ -34,6 +34,8 @@ def product_switcher_html(*, active: str = "racing") -> str:
 .hibs-product-pill:hover{{background:rgba(0,122,51,0.2);color:#e2e8f0;}}
 .hibs-product-pill.active{{background:linear-gradient(135deg,#007A33,#055a28);color:#fff;}}
 .hibs-product-label{{font-size:0.75em;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;}}
+/* Hide legacy hibs-racing Football|Racing bar when unified 3-pill inject is present */
+body:has(#hibs-product-bar-inject) .hibs-product-bar{{display:none !important;}}
 </style>
 <nav class="hibs-product-bar-inject" role="navigation" aria-label="HIBS products" id="hibs-product-bar-inject">
   <span class="hibs-product-label">HIBS</span>
