@@ -28,6 +28,7 @@ for rel in \
   templates/_product_switcher.html \
   deploy/product_switcher_inject.py \
   deploy/racing_production_guards.py \
+  deploy/racing_nav_prefix_fix.js \
   scripts/wire_product_toggles.sh; do
   fetch "${rel}"
 done
