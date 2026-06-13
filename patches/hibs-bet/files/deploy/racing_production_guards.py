@@ -1,6 +1,7 @@
 """Production guards for hibs-racing on VPS (single gunicorn worker).
 
 - Rewrites nav + API paths for /racing subpath (menu/insights fix).
+- Rewrites /static/* script and stylesheet URLs to /racing/static/* (racecard UI).
 - Blocks in-process UI refresh (fetch-cards in web worker → ping timeout).
 - Hides 'Refresh 24h' controls in HTML.
 """
@@ -25,6 +26,11 @@ _BLOCK_PATH_RE = re.compile(
 
 _NAV_FIX_JS: str | None = None
 
+_STATIC_ATTR_RE = re.compile(
+    r'(?P<attr>\b(?:src|href))=(?P<q>["\'])/static/(?P<path>[^"\']+)(?P=q)',
+    re.I,
+)
+
 
 def _ui_refresh_disabled() -> bool:
     return os.getenv("HIBS_DISABLE_UI_REFRESH", "1").strip().lower() in (
@@ -39,6 +45,25 @@ def _production_subpath() -> bool:
     return bool((os.getenv("HIBS_URL_PREFIX") or "").strip()) or os.getenv(
         "HIBS_PRODUCTION", ""
     ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _racing_url_prefix() -> str:
+    return (os.getenv("HIBS_URL_PREFIX") or "/racing").rstrip("/")
+
+
+def _rewrite_racing_static_urls(body: str) -> str:
+    """Point /static/* assets at the racing mount (defer scripts must be fixed server-side)."""
+    prefix = _racing_url_prefix()
+    if not prefix:
+        return body
+
+    def _repl(match: re.Match[str]) -> str:
+        attr = match.group("attr")
+        quote = match.group("q")
+        path = match.group("path")
+        return f'{attr}={quote}{prefix}/static/{path}{quote}'
+
+    return _STATIC_ATTR_RE.sub(_repl, body)
 
 
 def _nav_fix_js() -> str:
@@ -100,6 +125,12 @@ def apply_production_guards(app: Flask) -> None:
 
         inject_parts: list[str] = []
         body_changed = False
+
+        if _production_subpath():
+            rewritten = _rewrite_racing_static_urls(body)
+            if rewritten != body:
+                body = rewritten
+                body_changed = True
 
         if _production_subpath() and "hibs-product-bar-inject" not in body:
             try:
