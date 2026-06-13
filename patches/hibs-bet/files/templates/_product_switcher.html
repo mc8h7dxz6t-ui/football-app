@@ -1,0 +1,51 @@
+{# UI-only sport toggle — no effect on prediction, DQ, or enrich pipelines. #}
+<style>
+.hibs-product-bar{
+    display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;
+    padding:8px 14px;margin-bottom:12px;
+    background:rgba(6,14,24,0.92);border:1px solid var(--border);border-radius:10px;
+}
+.hibs-product-switch{display:inline-flex;border:1px solid rgba(148,163,184,0.25);border-radius:999px;overflow:hidden;}
+.hibs-product-pill{
+    padding:6px 14px;font-size:0.82em;font-weight:700;text-decoration:none;color:#cbd5e1;
+    background:rgba(0,0,0,0.25);transition:background .15s,color .15s;
+}
+.hibs-product-pill:hover{background:rgba(0,122,51,0.2);color:#e2e8f0;}
+.hibs-product-pill.active{background:linear-gradient(135deg,#007A33,#055a28);color:#fff;}
+.hibs-stack-dot{
+    display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;vertical-align:middle;
+    background:#64748b;box-shadow:0 0 0 1px rgba(0,0,0,0.35);
+}
+.hibs-stack-dot.live{background:#22c55e;}
+.hibs-stack-dot.warm{background:#f59e0b;}
+.hibs-stack-dot.offline{background:#ef4444;}
+.hibs-product-pill.active .hibs-stack-dot{box-shadow:0 0 0 1px rgba(255,255,255,0.35);}
+.hibs-harvested-logo-link{display:inline-flex;align-items:center;line-height:0;flex-shrink:0;}
+.hibs-harvested-logo,.hibs-header-logo{height:56px;width:auto;max-width:min(420px,58vw);object-fit:contain;filter:drop-shadow(0 2px 12px rgba(0,0,0,0.35));}
+.hibs-product-bar .hibs-harvested-logo{height:64px;max-width:min(480px,62vw);}
+.hibs-stock-glyph{width:22px;height:22px;flex-shrink:0;opacity:0.9;}
+@media(max-width:640px){.hibs-harvested-logo,.hibs-header-logo{height:44px;}.hibs-product-bar .hibs-harvested-logo{height:48px;}}
+</style>
+<div class="hibs-product-bar" role="navigation" aria-label="HIBS products">
+    {% from '_hibs_brand.html' import harvested_logo_link %}
+    <svg class="hibs-stock-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="#10b981" d="M4 18V6h2v12H4zm5-8v8H7V8h2zm5 4v4h-2v-4h2zm5-6v10h-2V8h2z"/>
+        <path fill="none" stroke="#1e3a8a" stroke-width="1.5" d="M3 18h18"/>
+    </svg>
+    {{ harvested_logo_link(home_url=hibs_football_home_url|default('/'), height=64) }}
+    <div class="hibs-product-switch">
+        <a href="{{ hibs_football_home_url|default('/') }}"
+           class="hibs-product-pill {% if hibs_product_active == 'football' %}active{% endif %}">⚽ Football</a>
+        <a href="{{ hibs_racing_cards_url|default(hibs_racing_base_url ~ '/cards') }}"
+           class="hibs-product-pill {% if hibs_product_active == 'racing' %}active{% endif %}"
+           rel="noopener" data-stack-pill="racing" title="Racing cards & insights">
+           🏇 Racing<span class="hibs-stack-dot" id="hibs-stack-racing" aria-hidden="true"></span></a>
+        <a href="{{ hibs_trading_status_url|default('/harvested-execution') }}"
+           class="hibs-product-pill {% if hibs_product_active == 'trading' %}active{% endif %}"
+           rel="noopener" data-stack-pill="trading" title="Harvested Execution — paper metrics">
+           📈 Trading<span class="hibs-stack-dot" id="hibs-stack-trading" aria-hidden="true"></span></a>
+    </div>
+    <span class="hibs-product-bar-spacer" aria-hidden="true"></span>
+    {% include '_inst_grade_chip.html' %}
+</div>
+<script src="{{ url_for('static', filename='hibs_product_stacks.js') }}" defer></script>
