@@ -11,7 +11,8 @@ APP="${DEPLOY_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${APP}"
 RAW="${HIBS_BET_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/hibs-bet/cursor/wc-clv-predicted-outcome-fallback-c4a1}"
 RAW_FALLBACK="${HIBS_BET_RAW_FALLBACK:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/patches/hibs-bet}"
-PATCH_LOCAL="${APP}/patches/wc-clv-f8.patch"
+PATCH_LOCAL="${APP}/patches/wc-clv-f8-core.patch"
+PATCH_LOCAL_FULL="${APP}/patches/wc-clv-f8.patch"
 PY="${APP}/.venv/bin/python3"
 [[ -x "${PY}" ]] || PY=python3
 
@@ -44,13 +45,10 @@ apply_patch() {
   local patch_file="$1"
   log "applying ${patch_file}"
   if git -C "${APP}" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "${APP}" am --3way "${patch_file}" || {
-      warn "git am failed — trying git apply"
-      git -C "${APP}" apply --3way "${patch_file}" || patch -p1 <"${patch_file}"
-    }
-  else
-    patch -p1 <"${patch_file}"
+    git -C "${APP}" apply --3way "${patch_file}" 2>/dev/null && return 0
   fi
+  patch -p1 --forward <"${patch_file}" || true
+  find "${APP}" -name '*.rej' -delete 2>/dev/null || true
 }
 
 fetch_patch() {
@@ -58,6 +56,16 @@ fetch_patch() {
   mkdir -p "$(dirname "${dest}")"
   if [[ -f "${PATCH_LOCAL}" ]]; then
     cp "${PATCH_LOCAL}" "${dest}"
+    return 0
+  fi
+  if [[ -f "${PATCH_LOCAL_FULL}" ]]; then
+    cp "${PATCH_LOCAL_FULL}" "${dest}"
+    return 0
+  fi
+  if curl -fsSL "${RAW}/patches/wc-clv-f8-core.patch" -o "${dest}" 2>/dev/null; then
+    return 0
+  fi
+  if curl -fsSL "${RAW_FALLBACK}/wc-clv-f8-core.patch" -o "${dest}" 2>/dev/null; then
     return 0
   fi
   if curl -fsSL "${RAW}/patches/wc-clv-f8.patch" -o "${dest}" 2>/dev/null; then
