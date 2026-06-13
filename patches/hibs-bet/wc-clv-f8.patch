@@ -1,0 +1,669 @@
+From 135b2107349bb25c6fbeedd3a0804a24c28ff9c3 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursor-agent@users.noreply.github.com>
+Date: Sat, 13 Jun 2026 11:08:11 +0000
+Subject: [PATCH] CLV: predicted_outcome fallback + scored backfill for WC F8
+ (inst++ evidence)
+
+- HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 (default): CLV on model pick when best_bet is null
+- backfill_clv_closing_for_scored() after pred-log-sync for already-FT audit rows
+- clv_beat_close_summary dedupes one row per fixture_id
+- scripts/diagnose_wc_clv.py for WC row inspection
+- Forward evidence F8 next_action mentions WC CLV path
+---
+ .env.example                                  |   2 +
+ scripts/diagnose_wc_clv.py                    |  66 ++++
+ src/hibs_predictor/forward_evidence.py        |   5 +-
+ src/hibs_predictor/prediction_log.py          | 316 ++++++++++++++++--
+ .../test_prediction_log_clv_institutional.py  | 124 +++++++
+ 5 files changed, 475 insertions(+), 38 deletions(-)
+ create mode 100644 scripts/diagnose_wc_clv.py
+
+diff --git a/.env.example b/.env.example
+index fc16c7e..55f3834 100644
+--- a/.env.example
++++ b/.env.example
+@@ -167,6 +167,7 @@ ODDS_API_KEY=your_odds_api_key_here
+ # HIBS_PRED_LOG_SYNC_AUTO=1       — auto-settle FT results after each bundle build (throttled, default on)
+ # HIBS_PRED_LOG_SYNC_AUTO_MIN_SEC=1800
+ # HIBS_CLV_LOG_ENABLED=1
++# HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1   — CLV on model 1X2 pick when no value bet (WC / tight lines)
+ #
+ # When APIs are blocked or thin, supplemental HTTP layers in (see scrapers/source_registry.py + HIBS_ENABLE_* below).
+ # Respect robots.txt, rate limits, and site terms; scrapers enrich data — they are not a full fixture calendar.
+@@ -275,6 +276,7 @@ STATS_API_KEY=your_stats_api_key_here
+ # HIBS_PREDICTION_LOG_RETAIN_DAYS=365
+ # With prediction log on: store opening 1X2 + best-bet odds in enrich_summary_json for CLV (default on).
+ # HIBS_CLV_LOG_ENABLED=1
++# HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1   — CLV on model 1X2 pick when no value bet (WC / tight lines)
+ # Audit odds capture (P0 — value replay / CLV need 1X2 in prediction_json):
+ # HIBS_AUDIT_ODDS_RETRY=1         — one Odds API + API-Football bundle fetch before snapshot insert
+ # HIBS_AUDIT_REQUIRE_ODDS=1       — daily cron skips fixtures still missing 1X2 after retry (Brier rows from dashboard may still log)
+diff --git a/scripts/diagnose_wc_clv.py b/scripts/diagnose_wc_clv.py
+new file mode 100644
+index 0000000..4f685b9
+--- /dev/null
++++ b/scripts/diagnose_wc_clv.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python3
++"""Diagnose WORLD_CUP audit rows vs forward CLV (F8) requirements."""
++from __future__ import annotations
++
++import json
++import sqlite3
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "src"))
++
++from hibs_predictor.forward_evidence import evidence_deploy_since_iso
++from hibs_predictor.prediction_log import _db_path
++
++
++def main() -> int:
++    since = evidence_deploy_since_iso()
++    conn = sqlite3.connect(_db_path())
++    rows = conn.execute(
++        """
++        SELECT kickoff_iso, home_name, away_name, captured_at,
++               result_outcome, result_recorded_at,
++               prediction_json, enrich_summary_json
++        FROM prediction_snapshots
++        WHERE league_code = 'WORLD_CUP'
++        ORDER BY kickoff_iso
++        """
++    ).fetchall()
++    conn.close()
++
++    print("since_deploy:", since)
++    print(f"WORLD_CUP snapshot rows: {len(rows)}\n")
++
++    for ko, h, a, cap, ro, rr, pj, ej in rows:
++        post = (ko or "") >= (since or "")
++        try:
++            pred = json.loads(pj or "{}")
++            best = pred.get("best_bet")
++            has_1x2 = bool(pred.get("bookmaker_odds") or pred.get("line_odds"))
++        except Exception:
++            best, has_1x2 = None, False
++        try:
++        clv = json.loads(ej or "{}").get("clv") or {}
++        pp = clv.get("clv_pp")
++        stake = clv.get("clv_stake_outcome")
++        src = clv.get("clv_stake_source")
++    except Exception:
++        pp = stake = src = None
++
++    if ro:
++        status = "SCORED"
++    elif rr:
++        status = "partial"
++    else:
++        status = "PENDING"
++
++    tag = "POST" if post else "PRE"
++    print(f"[{tag}] {status}  {ko}  {h} v {a}")
++    print(f"      captured={cap}  1x2={has_1x2}  best_bet={best}  stake={stake}({src})  clv_pp={pp}")
++
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/hibs_predictor/forward_evidence.py b/src/hibs_predictor/forward_evidence.py
+index 013f02f..af04cfb 100644
+--- a/src/hibs_predictor/forward_evidence.py
++++ b/src/hibs_predictor/forward_evidence.py
+@@ -236,7 +236,10 @@ def _next_actions(gates: List[Dict[str, Any]], since: Optional[str]) -> List[str
+         actions.append("bash scripts/run_forward_backfill_plan.sh")
+         actions.append("Load dashboard while logged in during fixture days (seeds snapshots).")
+     if not by_id.get("F8_clv_sample", {}).get("pass"):
+-        actions.append("Wait for matchdays + daily pred-log-sync; do not scale stakes until n≥25.")
++        actions.append(
++            "Run pred-log-sync after FT (HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1 for WC rows without best_bet); "
++            "need n≥25 before scaling stakes."
++        )
+     if not since:
+         actions.append("Set HIBS_EVIDENCE_DEPLOY_DATE in .env (or deploy via link_production.sh for .deploy-revision).")
+     if not actions:
+diff --git a/src/hibs_predictor/prediction_log.py b/src/hibs_predictor/prediction_log.py
+index 3ea7998..7e14a1d 100644
+--- a/src/hibs_predictor/prediction_log.py
++++ b/src/hibs_predictor/prediction_log.py
+@@ -4,7 +4,8 @@ Persistent prediction audit trail + post-match result join for calibration / ROI
+ Enabled by default (set HIBS_PREDICTION_LOG_ENABLED=0 to disable). After each fixture bundle
+ build, log_predictions_from_fixtures runs when HIBS_PREDICTION_LOG_ALWAYS=1 (default on).
+ CLV: HIBS_CLV_LOG_ENABLED=1 (default when log on) stores opening
+-1X2 + best-bet odds at capture; pred-log-sync joins closing 1X2 from API-Football fixture odds
++1X2 + stake-side odds at capture (value bet, or predicted_outcome when
++HIBS_CLV_PREDICTED_OUTCOME_FALLBACK=1); pred-log-sync joins closing 1X2 from API-Football fixture odds
+ when available and computes clv_pp (stake implied vs close, percentage points).
+ All logging is best-effort and must never break predictions.
+ """
+@@ -20,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
+ 
+ from dotenv import load_dotenv
+ 
++_BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++_DEFAULT_DB = os.path.join(_BASE, "data", "prediction_audit.sqlite")
++
++
+ def _db_path() -> str:
+     load_dotenv()
+-    from hibs_predictor.project_paths import resolve_data_path
+-
+-    return str(resolve_data_path("HIBS_PREDICTION_LOG_DB", "data/prediction_audit.sqlite"))
++    return os.getenv("HIBS_PREDICTION_LOG_DB", _DEFAULT_DB)
+ 
+ 
+ def _enabled() -> bool:
+@@ -59,6 +62,53 @@ def _clv_enabled() -> bool:
+     return raw not in ("0", "false", "no", "off")
+ 
+ 
++def _clv_predicted_outcome_fallback_enabled() -> bool:
++    """When on, CLV uses model 1X2 pick when no value-bet (best_bet) is flagged — needed for tight WC lines."""
++    load_dotenv()
++    raw = (os.getenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK") or "1").strip().lower()
++    return raw not in ("0", "false", "no", "off")
++
++
++def _normalize_1x2_outcome(raw: Any) -> Optional[str]:
++    if raw is None:
++        return None
++    oc = str(raw).strip().lower()
++    return oc if oc in ("home", "draw", "away") else None
++
++
++def _resolve_clv_stake_outcome(prediction: Dict[str, Any]) -> Tuple[Optional[str], str]:
++    """Return (stake side, source) for CLV: value bet first, else predicted_outcome when fallback on."""
++    best = _normalize_1x2_outcome(prediction.get("best_bet"))
++    if best:
++        return best, "best_bet"
++    if _clv_predicted_outcome_fallback_enabled():
++        pred = _normalize_1x2_outcome(prediction.get("predicted_outcome"))
++        if pred:
++            return pred, "predicted_outcome"
++    return None, ""
++
++
++def _stake_open_odds(
++    stake_outcome: Optional[str],
++    opening: Dict[str, Optional[float]],
++    *,
++    best_bet: Any = None,
++    best_bet_odds: Any = None,
++) -> Optional[float]:
++    if not stake_outcome:
++        return None
++    if _normalize_1x2_outcome(best_bet) == stake_outcome and best_bet_odds is not None:
++        try:
++            o = float(best_bet_odds)
++            if o > 1.0:
++                return o
++        except (TypeError, ValueError):
++            pass
++    if isinstance(opening, dict):
++        return _decimal_odds_side(opening.get(stake_outcome))
++    return None
++
++
+ def _min_interval_sec() -> int:
+     try:
+         return max(0, int(os.getenv("HIBS_PREDICTION_LOG_MIN_INTERVAL_SEC", "3600")))
+@@ -388,17 +438,56 @@ def _clv_opening_capture(fixture: Dict[str, Any], prediction: Dict[str, Any]) ->
+             best_odds = float(o) if o is not None and float(o) > 1.0 else None
+         except (TypeError, ValueError):
+             best_odds = None
++    stake_outcome, stake_source = _resolve_clv_stake_outcome(prediction)
++    stake_odds = _stake_open_odds(
++        stake_outcome,
++        opening,
++        best_bet=best,
++        best_bet_odds=best_odds,
++    )
+     return {
+         "opening_odds_1x2": opening,
+         "best_bet_outcome": best,
+         "best_bet_odds": best_odds,
+         "best_bet_edge_pct": (best_row or {}).get("edge_pct") if isinstance(best_row, dict) else None,
++        "clv_stake_outcome": stake_outcome,
++        "clv_stake_source": stake_source or None,
++        "clv_stake_odds": stake_odds,
+         "odds_cross_max_implied_diff_pct": float(fixture.get("odds_cross_max_implied_diff_pct") or 0.0),
+         "closing_odds_1x2": None,
+         "clv_pp": None,
+     }
+ 
+ 
++def _ensure_clv_stake_fields(
++    clv: Dict[str, Any],
++    prediction: Dict[str, Any],
++    *,
++    fixture: Optional[Dict[str, Any]] = None,
++) -> Dict[str, Any]:
++    """Backfill clv_stake_* on historic rows captured before predicted-outcome fallback existed."""
++    if not isinstance(clv, dict):
++        return clv
++    stake, source = _resolve_clv_stake_outcome(prediction)
++    if not stake:
++        return clv
++    if not clv.get("clv_stake_outcome"):
++        clv["clv_stake_outcome"] = stake
++        clv["clv_stake_source"] = source or None
++    opening = clv.get("opening_odds_1x2")
++    if not isinstance(opening, dict) or not any(opening.get(s) for s in ("home", "draw", "away")):
++        opening = _opening_1x2_odds(fixture or {}, prediction)
++        clv["opening_odds_1x2"] = opening
++    if clv.get("clv_stake_odds") is None:
++        clv["clv_stake_odds"] = _stake_open_odds(
++            clv.get("clv_stake_outcome") or stake,
++            opening if isinstance(opening, dict) else {},
++            best_bet=prediction.get("best_bet"),
++            best_bet_odds=clv.get("best_bet_odds"),
++        )
++    return clv
++
++
+ def _resolve_data_quality_pct(fixture: Dict[str, Any], prediction: Optional[Dict[str, Any]] = None) -> float:
+     """Persist non-zero data_quality_pct on historic rows (fixture → prediction → recompute)."""
+     for src in (fixture, prediction or {}):
+@@ -741,8 +830,12 @@ def _apply_clv_to_enrich_summary(
+         return enrich
+     opening = clv.get("opening_odds_1x2") or {}
+     clv["closing_odds_1x2"] = closing
+-    outcome = clv.get("best_bet_outcome")
+-    open_odds = clv.get("best_bet_odds")
++    outcome = _normalize_1x2_outcome(clv.get("clv_stake_outcome")) or _normalize_1x2_outcome(
++        clv.get("best_bet_outcome")
++    )
++    open_odds = clv.get("clv_stake_odds")
++    if open_odds is None:
++        open_odds = clv.get("best_bet_odds")
+     if open_odds is None and outcome:
+         open_odds = (opening or {}).get(str(outcome))
+     close_side = closing.get(str(outcome)) if outcome else None
+@@ -753,6 +846,160 @@ def _apply_clv_to_enrich_summary(
+     return enrich
+ 
+ 
++def _apply_clv_closing_to_fixture_snapshots(
++    conn: sqlite3.Connection,
++    *,
++    api_fixture_id: int,
++    stored_fixture_id: Any,
++    closing: Dict[str, Optional[float]],
++) -> int:
++    """Join closing 1X2 and compute clv_pp for all snapshot rows on a fixture."""
++    snap_rows = conn.execute(
++        """
++        SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
++        WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
++        """,
++        (api_fixture_id, int(stored_fixture_id)),
++    ).fetchall()
++    updated = 0
++    for sr in snap_rows:
++        try:
++            enrich = json.loads(sr["enrich_summary_json"])
++        except Exception:
++            continue
++        if not isinstance(enrich, dict):
++            continue
++        try:
++            pred = json.loads(sr["prediction_json"] or "{}")
++        except Exception:
++            pred = {}
++        if not isinstance(pred, dict):
++            pred = {}
++        if "clv" not in enrich and enrich.get("odds_available") and pred:
++            enrich["clv"] = _clv_opening_capture({}, pred)
++        if "clv" not in enrich:
++            continue
++        enrich["clv"] = _ensure_clv_stake_fields(enrich["clv"], pred)
++        before = (enrich.get("clv") or {}).get("clv_pp")
++        enrich = _apply_clv_to_enrich_summary(enrich, closing)
++        after = (enrich.get("clv") or {}).get("clv_pp")
++        if after is None and before is None:
++            continue
++        conn.execute(
++            "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
++            (json.dumps(enrich, default=str), sr["id"]),
++        )
++        if after is not None:
++            updated += 1
++    if updated:
++        conn.commit()
++    return updated
++
++
++def _fixture_needs_clv_backfill(conn: sqlite3.Connection, fixture_id: Any) -> bool:
++    """True when a scored fixture has snapshots missing parseable clv_pp."""
++    rows = conn.execute(
++        """
++        SELECT enrich_summary_json, prediction_json
++        FROM prediction_snapshots
++        WHERE fixture_id = ?
++          AND result_outcome IS NOT NULL AND result_outcome != ''
++        LIMIT 8
++        """,
++        (int(fixture_id),),
++    ).fetchall()
++    for enrich_raw, pred_raw in rows:
++        try:
++            enrich = json.loads(enrich_raw or "{}")
++        except Exception:
++            enrich = {}
++        try:
++            pred = json.loads(pred_raw or "{}")
++        except Exception:
++            pred = {}
++        if not isinstance(pred, dict):
++            continue
++        stake, _ = _resolve_clv_stake_outcome(pred)
++        if not stake:
++            continue
++        clv = enrich.get("clv") if isinstance(enrich, dict) else None
++        if not isinstance(clv, dict):
++            if isinstance(enrich, dict) and enrich.get("odds_available"):
++                return True
++            continue
++        if clv.get("clv_pp") is None:
++            return True
++    return False
++
++
++def backfill_clv_closing_for_scored(
++    fetch_fixture_fn: Any,
++    *,
++    fetch_odds_fn: Any,
++    fetch_by_league_fn: Any = None,
++    fetch_by_date_fn: Any = None,
++    max_fixtures: int = 400,
++) -> Dict[str, Any]:
++    """
++    Join closing 1X2 for fixtures already scored but missing clv_pp (e.g. WC rows with best_bet=None).
++
++    Safe to run after every pred-log-sync — only polls fixtures that still need CLV.
++    """
++    out: Dict[str, Any] = {
++        "clv_backfill_fixtures": 0,
++        "clv_rows_updated": 0,
++        "clv_backfill_skipped": 0,
++    }
++    if not _clv_enabled() or fetch_odds_fn is None or not os.path.isfile(_db_path()):
++        return out
++    init_db()
++    conn = sqlite3.connect(_db_path(), timeout=20)
++    conn.row_factory = sqlite3.Row
++    try:
++        groups = conn.execute(
++            """
++            SELECT fixture_id, MIN(kickoff_iso) AS kickoff_iso,
++                   MAX(home_name) AS home_name, MAX(away_name) AS away_name,
++                   MAX(league_code) AS league_code
++            FROM prediction_snapshots
++            WHERE result_outcome IS NOT NULL AND result_outcome != ''
++            GROUP BY fixture_id
++            ORDER BY MIN(kickoff_iso) DESC
++            LIMIT ?
++            """,
++            (int(max_fixtures),),
++        ).fetchall()
++        for r in groups:
++            if not _fixture_needs_clv_backfill(conn, r["fixture_id"]):
++                out["clv_backfill_skipped"] += 1
++                continue
++            fid_int, raw, note = _resolve_api_fixture_id(
++                r,
++                fetch_fixture_fn=fetch_fixture_fn,
++                fetch_by_league_fn=fetch_by_league_fn,
++                fetch_by_date_fn=fetch_by_date_fn,
++            )
++            if fid_int is None:
++                continue
++            try:
++                odds_raw = fetch_odds_fn(fid_int)
++                closing = parse_closing_1x2_from_odds_response(odds_raw)
++            except Exception:
++                closing = {"home": None, "draw": None, "away": None}
++            n = _apply_clv_closing_to_fixture_snapshots(
++                conn,
++                api_fixture_id=fid_int,
++                stored_fixture_id=r["fixture_id"],
++                closing=closing,
++            )
++            if n:
++                out["clv_backfill_fixtures"] += 1
++                out["clv_rows_updated"] += n
++    finally:
++        conn.close()
++    return out
++
++
+ def _kickoff_date_str(kickoff_iso: str) -> Optional[str]:
+     ko = _parse_kickoff_iso(kickoff_iso)
+     if ko is None:
+@@ -1003,37 +1250,24 @@ def sync_finished_results(
+                     except Exception:
+                         pass
+                     closing = {"home": None, "draw": None, "away": None}
+-                snap_rows = conn.execute(
+-                    """
+-                    SELECT id, enrich_summary_json, prediction_json FROM prediction_snapshots
+-                    WHERE fixture_id IN (?, ?) AND enrich_summary_json IS NOT NULL
+-                    """,
+-                    (fid_int, int(r["fixture_id"])),
+-                ).fetchall()
+-                for sr in snap_rows:
+-                    try:
+-                        enrich = json.loads(sr["enrich_summary_json"])
+-                    except Exception:
+-                        continue
+-                    if not isinstance(enrich, dict):
+-                        continue
+-                    if "clv" not in enrich and enrich.get("odds_available"):
+-                        try:
+-                            pred = json.loads(sr["prediction_json"] or "{}")
+-                        except Exception:
+-                            pred = {}
+-                        if isinstance(pred, dict) and pred:
+-                            enrich["clv"] = _clv_opening_capture({}, pred)
+-                    if "clv" not in enrich:
+-                        continue
+-                    enrich = _apply_clv_to_enrich_summary(enrich, closing)
+-                    conn.execute(
+-                        "UPDATE prediction_snapshots SET enrich_summary_json=? WHERE id=?",
+-                        (json.dumps(enrich, default=str), sr["id"]),
+-                    )
+-                conn.commit()
++                _apply_clv_closing_to_fixture_snapshots(
++                    conn,
++                    api_fixture_id=fid_int,
++                    stored_fixture_id=r["fixture_id"],
++                    closing=closing,
++                )
+     finally:
+         conn.close()
++    if _clv_enabled() and fetch_odds_fn is not None:
++        bf = backfill_clv_closing_for_scored(
++            fetch_fixture_fn,
++            fetch_odds_fn=fetch_odds_fn,
++            fetch_by_league_fn=fetch_by_league_fn,
++            fetch_by_date_fn=fetch_by_date_fn,
++            max_fixtures=int(max_fixtures),
++        )
++        stats["clv_backfill_fixtures"] = int(bf.get("clv_backfill_fixtures") or 0)
++        stats["clv_rows_updated"] = int(bf.get("clv_rows_updated") or 0)
+     stats["updated"] = int(updated)
+     scored = conn_row_count_scored() if updated else None
+     if scored is not None:
+@@ -1043,7 +1277,9 @@ def sync_finished_results(
+             f"Updated {updated} snapshot row(s); "
+             f"pending groups {stats['pending_fixture_groups']}; "
+             f"resolved_by_teams {stats['resolved_by_teams']}; "
+-            f"unresolved {stats['unresolved_fixture']}"
++            f"unresolved {stats['unresolved_fixture']}; "
++            f"clv_backfill {stats.get('clv_backfill_fixtures', 0)} fixture(s), "
++            f"{stats.get('clv_rows_updated', 0)} row(s)"
+         )
+     return stats
+ 
+@@ -1881,8 +2117,14 @@ def clv_beat_close_summary(*, days: int = 28, since_iso: str | None = None) -> D
+             FROM prediction_snapshots
+             WHERE result_outcome IS NOT NULL AND result_outcome != ''
+               AND kickoff_iso >= ?
++              AND id IN (
++                SELECT MAX(id) FROM prediction_snapshots
++                WHERE result_outcome IS NOT NULL AND result_outcome != ''
++                  AND kickoff_iso >= ?
++                GROUP BY fixture_id
++              )
+             """,
+-            (cutoff,),
++            (cutoff, cutoff),
+         ).fetchall()
+     finally:
+         conn.close()
+diff --git a/tests/test_prediction_log_clv_institutional.py b/tests/test_prediction_log_clv_institutional.py
+index ff03f65..caa03ac 100644
+--- a/tests/test_prediction_log_clv_institutional.py
++++ b/tests/test_prediction_log_clv_institutional.py
+@@ -3,10 +3,134 @@
+ from __future__ import annotations
+ 
+ import json
++import sqlite3
+ 
+ import pytest
+ 
+ 
++def test_clv_predicted_outcome_fallback_when_no_best_bet(monkeypatch):
++    from hibs_predictor.prediction_log import _clv_opening_capture
++
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    prediction = {
++        "predicted_outcome": "home",
++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 3.8},
++        "best_bet": None,
++        "value_bets": {},
++    }
++    clv = _clv_opening_capture({}, prediction)
++    assert clv["clv_stake_outcome"] == "home"
++    assert clv["clv_stake_source"] == "predicted_outcome"
++    assert clv["clv_stake_odds"] == 2.1
++
++
++def test_clv_prefers_best_bet_over_predicted_outcome(monkeypatch):
++    from hibs_predictor.prediction_log import _clv_opening_capture
++
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    prediction = {
++        "predicted_outcome": "draw",
++        "best_bet": "away",
++        "value_bets": {"away": {"odds": 4.5, "edge_pct": 6.0}},
++        "bookmaker_odds": {"home": 2.1, "draw": 3.4, "away": 4.5},
++    }
++    clv = _clv_opening_capture({}, prediction)
++    assert clv["clv_stake_outcome"] == "away"
++    assert clv["clv_stake_source"] == "best_bet"
++
++
++def test_backfill_clv_on_scored_row_without_best_bet(monkeypatch, tmp_path):
++    from hibs_predictor.prediction_log import (
++        backfill_clv_closing_for_scored,
++        clv_beat_close_summary,
++        init_db,
++    )
++
++    db = tmp_path / "audit.sqlite"
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_DB", str(db))
++    monkeypatch.setenv("HIBS_PREDICTION_LOG_ENABLED", "1")
++    monkeypatch.setenv("HIBS_CLV_LOG_ENABLED", "1")
++    monkeypatch.setenv("HIBS_CLV_PREDICTED_OUTCOME_FALLBACK", "1")
++    init_db()
++    enrich = {
++        "odds_available": True,
++        "clv": {
++            "opening_odds_1x2": {"home": 2.0, "draw": 3.5, "away": 4.0},
++            "best_bet_outcome": None,
++            "best_bet_odds": None,
++            "closing_odds_1x2": None,
++            "clv_pp": None,
++        },
++    }
++    pred = {
++        "predicted_outcome": "home",
++        "probabilities": {"home": 0.55, "draw": 0.25, "away": 0.20},
++        "bookmaker_odds": {"home": 2.0, "draw": 3.5, "away": 4.0},
++        "best_bet": None,
++    }
++    conn = sqlite3.connect(str(db))
++    for fid in (8801, 8801):
++        conn.execute(
++            """
++            INSERT INTO prediction_snapshots (
++                captured_at, fixture_id, league_code, kickoff_iso, home_name, away_name,
++                one_x2_mode, xg_source, data_quality_pct, prediction_json, enrich_summary_json,
++                result_home, result_away, result_outcome, result_status, result_recorded_at
++            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
++            """,
++            (
++                "2026-06-11T12:00:00+00:00",
++                fid,
++                "WORLD_CUP",
++                "2026-06-11T19:00:00+00:00",
++                "Mexico",
++                "South Africa",
++                "ensemble",
++                "api",
++                85.0,
++                json.dumps(pred),
++                json.dumps(enrich),
++                1,
++                0,
++                "home",
++                "FT",
++                "2026-06-11T22:00:00+00:00",
++            ),
++        )
++    conn.commit()
++    conn.close()
++
++    def fetch_fixture(_fid):
++        return {"fixture": {"status": {"short": "FT"}}, "goals": {"home": 1, "away": 0}}
++
++    def fetch_odds(_fid):
++        return [
++            {
++                "bookmakers": [
++                    {
++                        "bets": [
++                            {
++                                "name": "Match Winner",
++                                "values": [
++                                    {"value": "Home", "odd": "1.85"},
++                                    {"value": "Draw", "odd": "3.6"},
++                                    {"value": "Away", "odd": "4.2"},
++                                ],
++                            }
++                        ]
++                    }
++                ]
++            }
++        ]
++
++    out = backfill_clv_closing_for_scored(fetch_fixture, fetch_odds_fn=fetch_odds)
++    assert out["clv_backfill_fixtures"] == 1
++    assert out["clv_rows_updated"] >= 1
++
++    summary = clv_beat_close_summary(days=28, since_iso="2026-06-11T00:00:00+00:00")
++    assert summary["n_clv_rows"] == 1
++
++
+ def test_opening_1x2_from_line_odds_and_fixture():
+     from hibs_predictor.prediction_log import _clv_opening_capture, _opening_1x2_odds
+ 
+-- 
+2.43.0
+
