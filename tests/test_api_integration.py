@@ -16,6 +16,10 @@ def test_health_ok(api_client):
     assert body["line_bus"] == "local"
     assert body.get("wire_codec") in ("orjson", "json", "msgpack")
     assert "ws_max_pending_sends" in body
+    assert "ws_client_delta" in body
+    ws = body.get("ws") or {}
+    assert "active_clients" in ws
+    assert "backpressure_drops" in ws
     assert "api_budgets" in body
 
 

@@ -497,12 +497,20 @@ with inst_tab:
         try:
             h = fve_api.health()
             st.success("API online")
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Cache", h.get("cache_backend", "—"))
             c2.metric("Line bus", h.get("line_bus", "—"))
             budgets = (h.get("api_budgets") or {}).get("sources") or {}
             odds_rem = (budgets.get("odds_api") or {}).get("remaining")
             c3.metric("Odds API left/hr", odds_rem if odds_rem is not None else "—")
+            ws = h.get("ws") or {}
+            c4.metric("WS clients", ws.get("active_clients", "—"))
+            if ws:
+                st.caption(
+                    f"WS drops: {ws.get('backpressure_drops', 0)} · "
+                    f"bus 60s: {ws.get('bus_messages_per_sec_60s', 0)}/s · "
+                    f"codec: {h.get('wire_codec', '—')}"
+                )
             with st.expander("Full /health JSON"):
                 st.json(h)
         except Exception as exc:

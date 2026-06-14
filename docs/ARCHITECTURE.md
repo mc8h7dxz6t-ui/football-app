@@ -67,6 +67,19 @@ Streamlit UI (or Hibs Bet via FVE_API_URL)
 | Dragonfly drop-in | `COMPOSE_PROFILES=dragonfly` | `redis://` compatible — see docker-compose |
 | TCP_NODELAY + split processes | `FVE_TCP_NODELAY=1` | Redis sockets; api/worker/ui separate services |
 
+### Phase 1.5 — Client merge + ops (implemented)
+
+| Item | Env / path | Status |
+|------|------------|--------|
+| WS client delta merge | `FVE_WS_CLIENT_DELTA=0` | Hub expands bus deltas to full `lines` by default |
+| Merge library | `pipeline/ws_lines_merge.py` | Python + JS (`patches/.../fve_ws_lines.js`) |
+| WS telemetry | `/health` → `ws` | `active_clients`, `backpressure_drops`, `bus_messages_per_sec_60s` |
+| Protobuf wire contract | `proto/market_tick.proto` | Phase 2 prep — mirrors `PriceTick` |
+| Hibs upstream unpause | `scripts/vps_unpause_fve_hibs_upstream.sh` | FVE_PAUSED=0 + `FVE_UPSTREAM_MODE=hibs` |
+| Matchbook poll tuning | `FEED_POLL_SEC_MATCHBOOK=0.5` | Bigger win than JSON serde on hot path |
+| Inst++ audit | `scripts/audit_institutional_all.sh` | FVE + football/racing evidence gates |
+| Racing health schema | `docs/RACING_HEALTH_SCHEMA.md` | hibs-racing R5–R7 `/api/health` fields |
+
 Do these **before** rewriting in Rust:
 
 1. **Delta WS payloads** — send `{type, changed_markets, ts}` not full `shopped` tree every tick.
