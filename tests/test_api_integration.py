@@ -14,6 +14,8 @@ def test_health_ok(api_client):
     assert body["status"] == "ok"
     assert body["cache_backend"] == "memory-zset"
     assert body["line_bus"] == "local"
+    assert body.get("wire_codec") in ("orjson", "json", "msgpack")
+    assert "ws_max_pending_sends" in body
     assert "api_budgets" in body
 
 

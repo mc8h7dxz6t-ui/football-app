@@ -12,17 +12,19 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from pipeline.cache import get_cache
-from pipeline.ingest import build_fixture_bundle, build_line_view, refresh_sports_context
+from pipeline.ingest import build_fixture_bundle, refresh_sports_context
 from pipeline.line_bus import get_line_bus
 
 log = logging.getLogger(__name__)
 
 _WS_SEND_TIMEOUT_SEC = float(os.environ.get("WS_SEND_TIMEOUT_SEC", "2.0"))
+_WS_MAX_PENDING_SENDS = int(os.environ.get("WS_MAX_PENDING_SENDS", "8"))
 
 
 class WsLineHub:
     def __init__(self) -> None:
         self._rooms: DefaultDict[str, Set[WebSocket]] = defaultdict(set)
+        self._pending: Dict[int, int] = {}
         self._lock = asyncio.Lock()
         self._started = False
 
@@ -40,6 +42,28 @@ class WsLineHub:
             return
         loop.create_task(self.broadcast(fixture_key, message))
 
+    async def _send_json(self, fixture_key: str, websocket: WebSocket, message: Dict[str, Any]) -> bool:
+        ws_id = id(websocket)
+        pending = self._pending.get(ws_id, 0)
+        if pending >= _WS_MAX_PENDING_SENDS:
+            log.warning("WS backpressure drop fixture=%s pending=%s", fixture_key, pending)
+            await self.disconnect(fixture_key, websocket)
+            try:
+                await websocket.close(code=1013)
+            except Exception:
+                pass
+            return False
+        self._pending[ws_id] = pending + 1
+        try:
+            await asyncio.wait_for(websocket.send_json(message), timeout=_WS_SEND_TIMEOUT_SEC)
+            return True
+        except Exception:
+            return False
+        finally:
+            self._pending[ws_id] = max(0, self._pending.get(ws_id, 1) - 1)
+            if self._pending.get(ws_id, 0) == 0:
+                self._pending.pop(ws_id, None)
+
     async def connect(self, fixture_key: str, websocket: WebSocket) -> None:
         self.ensure_started()
         await websocket.accept()
@@ -49,18 +73,21 @@ class WsLineHub:
         cache = get_cache()
         bundle = build_fixture_bundle(cache, fixture_key)
         if bundle.get("ready", {}).get("lines") or bundle.get("ready", {}).get("sports"):
-            await websocket.send_json({"type": "snapshot", **bundle})
+            await self._send_json(fixture_key, websocket, {"type": "snapshot", **bundle})
         else:
-            await websocket.send_json(
+            await self._send_json(
+                fixture_key,
+                websocket,
                 {
                     "type": "waiting",
                     "fixture_key": fixture_key,
                     "message": "No cached data yet — start worker.py ingest for this fixture.",
                     "ready": bundle.get("ready", {}),
-                }
+                },
             )
 
     async def disconnect(self, fixture_key: str, websocket: WebSocket) -> None:
+        self._pending.pop(id(websocket), None)
         async with self._lock:
             self._rooms[fixture_key].discard(websocket)
             if not self._rooms[fixture_key]:
@@ -71,9 +98,8 @@ class WsLineHub:
             clients = list(self._rooms.get(fixture_key, set()))
         dead: list[WebSocket] = []
         for ws in clients:
-            try:
-                await asyncio.wait_for(ws.send_json(message), timeout=_WS_SEND_TIMEOUT_SEC)
-            except Exception:
+            ok = await self._send_json(fixture_key, ws, message)
+            if not ok:
                 dead.append(ws)
         for ws in dead:
             await self.disconnect(fixture_key, ws)
@@ -82,15 +108,15 @@ class WsLineHub:
         await self.connect(fixture_key, websocket)
         try:
             while True:
-                # Optional client ping / subscribe extensions
                 msg = await websocket.receive_text()
-                if msg.strip().lower() == "ping":
-                    await websocket.send_json({"type": "pong"})
-                elif msg.strip().lower() in ("snapshot", "bundle"):
+                cmd = msg.strip().lower()
+                if cmd == "ping":
+                    await self._send_json(fixture_key, websocket, {"type": "pong"})
+                elif cmd in ("snapshot", "bundle"):
                     cache = get_cache()
                     bundle = build_fixture_bundle(cache, fixture_key)
-                    await websocket.send_json({"type": "snapshot", **bundle})
-                elif msg.strip().lower() == "refresh_sports":
+                    await self._send_json(fixture_key, websocket, {"type": "snapshot", **bundle})
+                elif cmd == "refresh_sports":
                     cache = get_cache()
                     sports = cache.get_sports(fixture_key) or {}
                     refresh_sports_context(
@@ -100,7 +126,7 @@ class WsLineHub:
                         force=True,
                     )
                     bundle = build_fixture_bundle(get_cache(), fixture_key)
-                    await websocket.send_json({"type": "sports_update", **bundle})
+                    await self._send_json(fixture_key, websocket, {"type": "sports_update", **bundle})
         except WebSocketDisconnect:
             pass
         finally:
