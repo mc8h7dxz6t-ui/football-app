@@ -9,9 +9,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
+from engine.book_consistency import cross_market_discrepancy
 from engine.devig import devig_1x2, overround
 from engine.fair_value import benchmark_vs_sharp
-from model import edge, goal_model, kelly, match_model
+from model import edge, expected_goals, full_market_probs, goal_model, kelly, match_model
 from pipeline.cache import get_cache
 from pipeline.circuit_breaker import breakers
 from pipeline.ingest import ingest_fixture, build_fixture_bundle, build_line_view, refresh_sports_context
@@ -199,6 +200,8 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         **match_model(home_stats, away_stats, use_xg=req.use_xg),
         **goal_model(home_stats, away_stats, use_xg=req.use_xg),
     }
+    lam_h, lam_a = expected_goals(home_stats, away_stats, use_xg=req.use_xg)
+    book_xm = cross_market_discrepancy(shopped, model_lam_h=lam_h, model_lam_a=lam_a)
 
     picks: List[Dict[str, Any]] = []
     for sel, prob in probs.items():
@@ -222,6 +225,7 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         if bench and bench.likely_hallucination:
             continue
         stake = req.bankroll * kelly(prob, odds) * req.kelly_fraction
+        xm_hint = next((h for h in book_xm.get("synthetic_hints", []) if h.get("market") == sel), None)
         picks.append(
             {
                 "market": sel,
@@ -233,10 +237,17 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
                 "stake": stake,
                 "sharp_fair_prob": bench.sharp_fair_prob if bench else None,
                 "edge_vs_sharp_pct": bench.edge_vs_sharp_pct if bench else None,
+                "cross_market_hint": xm_hint,
             }
         )
     picks.sort(key=lambda p: p["edge_pct"], reverse=True)
-    return {"fixture_key": req.fixture_key, "picks": picks, "sharp_fair_probs": sharp_fair}
+    return {
+        "fixture_key": req.fixture_key,
+        "picks": picks,
+        "sharp_fair_probs": sharp_fair,
+        "expected_goals": {"home": round(lam_h, 3), "away": round(lam_a, 3)},
+        "book_cross_market": book_xm,
+    }
 
 
 class ArbExecuteRequest(BaseModel):

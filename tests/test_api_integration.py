@@ -62,6 +62,8 @@ def test_value_scan_with_cached_lines(api_client, memory_cache, fixture_key):
     assert body["fixture_key"] == fixture_key
     assert isinstance(body["picks"], list)
     assert body["picks"]  # strong home vs weak away should produce at least one pick
+    assert "book_cross_market" in body
+    assert "expected_goals" in body
 
 
 def test_devig_demo(api_client):
