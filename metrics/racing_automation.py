@@ -47,8 +47,8 @@ def _load_state_snapshot(state_path: Path) -> Dict[str, Any]:
 
 
 def _run_outcome_for_status(status: str, *, skipped: bool = False) -> str:
-    if skipped or status == "skipped_concurrent":
-        return "skipped_concurrent"
+    if skipped or status in ("skipped_concurrent", "feature_store_busy"):
+        return status if status in ("skipped_concurrent", "feature_store_busy") else "skipped_concurrent"
     if status in ("error", "preflight_failed", "settlement_failed"):
         return "failed"
     return "completed"
@@ -223,7 +223,7 @@ def run_racing_verification_pipeline(
             report["last_full_run_at"] = report["finished_at"]
         elif prev.get("last_full_run_at"):
             report["last_full_run_at"] = prev["last_full_run_at"]
-        if report["run_outcome"] == "skipped_concurrent":
+        if report["run_outcome"] in ("skipped_concurrent", "feature_store_busy"):
             report["locked"] = True
             for key in (
                 "window",
@@ -252,13 +252,24 @@ def run_racing_verification_pipeline(
 
     results_path = os.environ.get("RACING_RESULTS_JSON", "").strip()
     if results_path and Path(results_path).is_file():
+        from metrics.feature_store_lock import FeatureStoreLockTimeout
         from metrics.racing_settlement import apply_results_batch
 
         try:
             batch = json.loads(Path(results_path).read_text(encoding="utf-8"))
             races_payload = batch if isinstance(batch, list) else batch.get("races", [])
             report["settlement"] = apply_results_batch(
-                cfg.feature_store, races_payload, table=cfg.table
+                cfg.feature_store,
+                races_payload,
+                table=cfg.table,
+            )
+        except FeatureStoreLockTimeout as exc:
+            return _finish(
+                ok=True,
+                status="feature_store_busy",
+                skipped=True,
+                hard_fail=False,
+                error=str(exc)[:200],
             )
         except Exception as exc:
             return _finish(ok=False, status="settlement_failed", error=str(exc)[:200], hard_fail=True)

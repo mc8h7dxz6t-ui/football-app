@@ -88,13 +88,32 @@ Default log path is `${HIBS_RACING_DEPLOY_PATH}/logs/verification-automation.log
 
 `FVE_METRICS_ROOT` points at the **football-app** checkout that hosts `metrics/` and the venv — not a root requirement.
 
+### SQLite write isolation (feature_store flock + single batch transaction)
+
+| Mechanism | Role |
+|-----------|------|
+| **`feature_store.sqlite.lock`** | POSIX `flock` shared by verification settlement and hibs-racing daily refresh (`metrics/feature_store_lock.py`, `scripts/feature_store_write_guard.sh`) |
+| **`BEGIN IMMEDIATE`** | `apply_results_batch()` holds one write transaction for the entire API payload — failure rolls back all races |
+| **WAL + `busy_timeout=30000`** | Readers (`mode=ro` extract) overlap writers; writers wait up to 30s on `SQLITE_BUSY` |
+| **`.verification.lock`** | Separate flock — dedupes concurrent **verification** runs only |
+
+Wrap hibs-racing card ingest:
+
+```bash
+HIBS_RACING_FEATURE_STORE=/opt/hibs-racing/data/feature_store.sqlite \
+  bash /opt/football-app/scripts/feature_store_write_guard.sh \
+    python -m hibs_racing.daily_refresh --score
+```
+
+If the feature_store flock cannot be acquired within `RACING_FEATURE_STORE_LOCK_WAIT_SEC` (default 60), verification settlement exits **0** with `run_outcome: feature_store_busy` (metrics preserved).
+
 ### flock skip vs successful run (`automation_state.json`)
 
 Concurrent runs use non-blocking flock. A skip exits **0** (benign for cron) but must **not** be treated as a fresh verification.
 
 | Field | Successful run | flock skip |
 |-------|----------------|------------|
-| `run_outcome` | `completed` | `skipped_concurrent` |
+| `run_outcome` | `completed` | `skipped_concurrent` or `feature_store_busy` |
 | `skipped` | `false` | `true` |
 | `locked` | `false` | `true` |
 | `last_full_run_at` | updated to this run | **unchanged** (prior full run) |

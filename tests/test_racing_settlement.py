@@ -103,3 +103,4 @@ def test_batch_settle_from_json(db):
     ]
     out = apply_results_batch(db, payload)
     assert out["rows_updated"] == 3
+    assert out["transaction"] == "single"

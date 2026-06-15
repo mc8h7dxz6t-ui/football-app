@@ -33,6 +33,7 @@ pip install -r requirements-xg.txt    # optional Understat xG (heavy)
 | Institutional metrics | `docs/INSTITUTIONAL_VERIFICATION.md` |
 | Racing JSONL emit | `scripts/emit_racing_verification_jsonl.py` (feature_store → settled_races.jsonl) |
 | Racing automation | `scripts/racing_verification_automation.sh --run` (cron-safe flock + data room) |
+| Feature store writes | `scripts/feature_store_write_guard.sh <cmd>` — shared flock with verification settlement |
 | Streamlit UI | `streamlit run app.py` → http://localhost:8501 |
 | Headless engine demo (no API) | `python3 run_backtest.py --simulate 6000` |
 | Live scan/backtest | Requires `API_SPORTS_KEY` (or `API_FOOTBALL_KEY`) env var or `.streamlit/secrets.toml` |

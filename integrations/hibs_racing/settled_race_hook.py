@@ -28,6 +28,17 @@ Or shell-out (no Python dep on football-app):
 
     python /path/to/football-app/scripts/emit_racing_verification_jsonl.py \\
       --feature-store data/feature_store.sqlite
+
+Settlement batches (results API → SQLite) must hold the shared flock:
+
+    from metrics.racing_settlement import apply_results_batch
+
+    apply_results_batch("data/feature_store.sqlite", races_payload)
+
+Or wrap shell jobs:
+
+    bash /path/to/football-app/scripts/feature_store_write_guard.sh \\
+      python -m hibs_racing.daily_refresh --score
 """
 
 from __future__ import annotations
