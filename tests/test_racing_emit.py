@@ -132,6 +132,36 @@ def test_extract_from_scored_runner_snapshots(scored_snapshots_db):
     assert by_id["r1:h1"]["model_prob"] > by_id["r1:h2"]["model_prob"]
 
 
+def test_extract_ignores_heavy_json_columns(tmp_path):
+    """Projected SELECT must skip manifest_json-sized blobs on snapshots."""
+    db = tmp_path / "heavy.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        """
+        CREATE TABLE scored_runner_snapshots (
+            race_id TEXT, runner_id TEXT, course TEXT, places INTEGER,
+            finish_pos INTEGER, model_place_prob REAL, scored_at TEXT,
+            manifest_json TEXT
+        )
+        """
+    )
+    blob = "x" * 500_000
+    rows = [
+        ("rac_1", "h1", "York", 3, 1, 0.5, "2026-06-01T12:00:00+00:00", blob),
+        ("rac_1", "h2", "York", 3, 2, 0.3, "2026-06-01T12:00:00+00:00", blob),
+        ("rac_1", "h3", "York", 3, 4, 0.2, "2026-06-01T12:00:00+00:00", blob),
+    ]
+    con.executemany(
+        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    con.commit()
+    con.close()
+    races = extract_settled_races_from_db(db, table="scored_runner_snapshots", target="place")
+    assert len(races) == 1
+    assert len(races[0]["runners"]) == 3
+
+
 def test_hook_emit(tmp_path):
     from integrations.hibs_racing.settled_race_hook import emit_race_from_scored_runners
 

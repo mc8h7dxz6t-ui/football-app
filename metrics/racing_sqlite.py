@@ -143,6 +143,170 @@ def _outcome_flags(
     return won, placed
 
 
+def _projection_columns(
+    *,
+    race_col: str,
+    runner_col: str,
+    venue_col: Optional[str],
+    mapped_col: Optional[str],
+    pos_col: Optional[str],
+    model_col: Optional[str],
+    mkt_place_col: Optional[str],
+    win_col: Optional[str],
+    pp_col: Optional[str],
+    ts_col: Optional[str],
+    settled_col: Optional[str],
+) -> List[str]:
+    """Columns required for export — never SELECT * (snapshots carry huge JSON blobs)."""
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for col in (
+        race_col,
+        runner_col,
+        venue_col,
+        mapped_col,
+        pos_col,
+        model_col,
+        mkt_place_col,
+        win_col,
+        pp_col,
+        ts_col,
+        settled_col,
+    ):
+        if col and col not in seen:
+            seen.add(col)
+            ordered.append(col)
+    return ordered
+
+
+def _settled_where(pos_col: Optional[str], settled_col: Optional[str], *, only_settled: bool) -> str:
+    if not only_settled:
+        return ""
+    if pos_col:
+        return f" WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
+    if settled_col:
+        return f" WHERE [{settled_col}] IS NOT NULL"
+    return ""
+
+
+def _eligible_race_ids(
+    con: sqlite3.Connection,
+    src: str,
+    *,
+    race_col: str,
+    runner_col: str,
+    pos_col: Optional[str],
+    settled_col: Optional[str],
+    only_settled: bool,
+) -> List[str]:
+    where = _settled_where(pos_col, settled_col, only_settled=only_settled)
+    sql = f"""
+        SELECT [{race_col}] AS rid
+        FROM [{src}]{where}
+        GROUP BY [{race_col}]
+        HAVING COUNT(DISTINCT [{runner_col}]) >= 2
+    """
+    return [str(r[0]) for r in con.execute(sql).fetchall()]
+
+
+def _build_race_record(
+    rid: str,
+    race_rows: List[sqlite3.Row],
+    *,
+    target: str,
+    place_positions: int,
+    race_meta: Dict[str, Any],
+    runner_col: str,
+    pos_col: Optional[str],
+    model_col: Optional[str],
+    mkt_place_col: Optional[str],
+    win_col: Optional[str],
+    ts_col: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    race_rows = _dedupe_race_rows(race_rows, runner_col=runner_col, ts_col=ts_col)
+    if len(race_rows) < 2:
+        return None
+
+    pp = int(race_meta.get("place_positions") or place_positions)
+    venue_mapped = bool(race_meta.get("venue_mapped", True))
+
+    raw_model: List[float] = []
+    for row in race_rows:
+        v = _row_get(row, model_col) if model_col else None
+        try:
+            raw_model.append(float(v) if v is not None else 0.0)
+        except (TypeError, ValueError):
+            raw_model.append(0.0)
+    model_probs = normalize_race_probs(raw_model) if any(raw_model) else [0.0] * len(race_rows)
+
+    runners_out: List[Dict[str, Any]] = []
+    for row, mp in zip(race_rows, model_probs):
+        pos_raw = _row_get(row, pos_col)
+        position: Optional[int] = None
+        if pos_raw is not None and str(pos_raw).strip() != "":
+            try:
+                position = int(float(pos_raw))
+            except (TypeError, ValueError):
+                position = None
+        won, placed = _outcome_flags(position, target=target, place_positions=pp)
+
+        market_prob = None
+        if mkt_place_col:
+            market_prob = decimal_to_implied_prob(_row_get(row, mkt_place_col))
+        if market_prob is None and win_col:
+            market_prob = decimal_to_implied_prob(_row_get(row, win_col))
+
+        runners_out.append(
+            runner_record(
+                runner_id=str(_row_get(row, runner_col)),
+                model_prob=mp,
+                market_prob=market_prob,
+                won=won,
+                placed=placed,
+            )
+        )
+
+    if target == "win" and not any(r["won"] for r in runners_out):
+        return None
+    if target == "place" and not any(r["placed"] for r in runners_out):
+        return None
+
+    return build_settled_race_record(
+        race_id=rid,
+        target=target,  # type: ignore[arg-type]
+        runners=runners_out,
+        venue_id=str(race_meta.get("venue_id") or ""),
+        venue_mapped=venue_mapped,
+        place_positions=pp,
+    )
+
+
+def _race_meta_from_rows(
+    race_rows: Sequence[sqlite3.Row],
+    *,
+    venue_col: Optional[str],
+    mapped_col: Optional[str],
+    pp_col: Optional[str],
+) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    for row in race_rows:
+        if venue_col and not meta.get("venue_id"):
+            meta["venue_id"] = str(_row_get(row, venue_col) or "")
+        if mapped_col and "venue_mapped" not in meta:
+            mv = _row_get(row, mapped_col)
+            if mv is not None:
+                meta["venue_mapped"] = str(mv).strip().lower() in ("1", "true", "yes", "on")
+        if pp_col and "place_positions" not in meta:
+            try:
+                meta["place_positions"] = int(_row_get(row, pp_col))
+            except (TypeError, ValueError):
+                pass
+    return meta
+
+
+_RACE_BATCH_SIZE = 100
+
+
 def extract_settled_races_from_db(
     db_path: str | Path,
     *,
@@ -174,92 +338,75 @@ def extract_settled_races_from_db(
         settled_col = _pick(cols, SETTLED_FLAG_COLS)
         pp_col = _pick(cols, PLACE_POSITIONS_COLS)
         ts_col = _pick(cols, ROW_DEDUP_TS_COLS)
+        proj_cols = _projection_columns(
+            race_col=race_col,
+            runner_col=runner_col,
+            venue_col=venue_col,
+            mapped_col=mapped_col,
+            pos_col=pos_col,
+            model_col=model_col,
+            mkt_place_col=mkt_place_col,
+            win_col=win_col,
+            pp_col=pp_col,
+            ts_col=ts_col,
+            settled_col=settled_col,
+        )
+        col_sql = ", ".join(f"[{c}]" for c in proj_cols)
 
-        sql = f"SELECT * FROM [{src}]"
-        if only_settled and pos_col:
-            sql += f" WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
-        rows = con.execute(sql).fetchall()
-        by_race: Dict[str, List[sqlite3.Row]] = {}
-        race_meta: Dict[str, Dict[str, Any]] = {}
-
-        for row in rows:
-            if only_settled and not _is_settled_row(row, settled_col, pos_col):
-                continue
-            rid = str(_row_get(row, race_col))
-            by_race.setdefault(rid, []).append(row)
-            meta = race_meta.setdefault(rid, {})
-            if venue_col and not meta.get("venue_id"):
-                meta["venue_id"] = str(_row_get(row, venue_col) or "")
-            if mapped_col and "venue_mapped" not in meta:
-                mv = _row_get(row, mapped_col)
-                if mv is not None:
-                    meta["venue_mapped"] = str(mv).strip().lower() in ("1", "true", "yes", "on")
-            if pp_col and "place_positions" not in meta:
-                try:
-                    meta["place_positions"] = int(_row_get(row, pp_col))
-                except (TypeError, ValueError):
-                    pass
+        race_ids = _eligible_race_ids(
+            con,
+            src,
+            race_col=race_col,
+            runner_col=runner_col,
+            pos_col=pos_col,
+            settled_col=settled_col,
+            only_settled=only_settled,
+        )
 
         records: List[Dict[str, Any]] = []
-        for rid, race_rows in by_race.items():
-            race_rows = _dedupe_race_rows(race_rows, runner_col=runner_col, ts_col=ts_col)
-            if len(race_rows) < 2:
+        pos_filter = ""
+        if only_settled and pos_col:
+            pos_filter = f" AND [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
+
+        for batch_start in range(0, len(race_ids), _RACE_BATCH_SIZE):
+            batch = race_ids[batch_start : batch_start + _RACE_BATCH_SIZE]
+            if not batch:
                 continue
-            meta = race_meta.get(rid, {})
-            pp = int(meta.get("place_positions") or place_positions)
-            venue_mapped = bool(meta.get("venue_mapped", True))
-
-            raw_model: List[float] = []
-            for row in race_rows:
-                v = _row_get(row, model_col) if model_col else None
-                try:
-                    raw_model.append(float(v) if v is not None else 0.0)
-                except (TypeError, ValueError):
-                    raw_model.append(0.0)
-            model_probs = normalize_race_probs(raw_model) if any(raw_model) else [0.0] * len(race_rows)
-
-            runners_out: List[Dict[str, Any]] = []
-            for row, mp in zip(race_rows, model_probs):
-                pos_raw = _row_get(row, pos_col)
-                position: Optional[int] = None
-                if pos_raw is not None and str(pos_raw).strip() != "":
-                    try:
-                        position = int(float(pos_raw))
-                    except (TypeError, ValueError):
-                        position = None
-                won, placed = _outcome_flags(position, target=target, place_positions=pp)
-
-                market_prob = None
-                if mkt_place_col:
-                    market_prob = decimal_to_implied_prob(_row_get(row, mkt_place_col))
-                if market_prob is None and win_col:
-                    market_prob = decimal_to_implied_prob(_row_get(row, win_col))
-
-                runners_out.append(
-                    runner_record(
-                        runner_id=str(_row_get(row, runner_col)),
-                        model_prob=mp,
-                        market_prob=market_prob,
-                        won=won,
-                        placed=placed,
-                    )
-                )
-
-            if target == "win" and not any(r["won"] for r in runners_out):
-                continue
-            if target == "place" and not any(r["placed"] for r in runners_out):
-                continue
-
-            records.append(
-                build_settled_race_record(
-                    race_id=rid,
-                    target=target,  # type: ignore[arg-type]
-                    runners=runners_out,
-                    venue_id=str(meta.get("venue_id") or ""),
-                    venue_mapped=venue_mapped,
-                    place_positions=pp,
-                )
+            placeholders = ",".join("?" for _ in batch)
+            sql = (
+                f"SELECT {col_sql} FROM [{src}] "
+                f"WHERE [{race_col}] IN ({placeholders}){pos_filter}"
             )
+            by_race: Dict[str, List[sqlite3.Row]] = {}
+            for row in con.execute(sql, batch):
+                if only_settled and not _is_settled_row(row, settled_col, pos_col):
+                    continue
+                rid = str(_row_get(row, race_col))
+                by_race.setdefault(rid, []).append(row)
+
+            for rid, race_rows in by_race.items():
+                meta = _race_meta_from_rows(
+                    race_rows,
+                    venue_col=venue_col,
+                    mapped_col=mapped_col,
+                    pp_col=pp_col,
+                )
+                rec = _build_race_record(
+                    rid,
+                    race_rows,
+                    target=target,
+                    place_positions=place_positions,
+                    race_meta=meta,
+                    runner_col=runner_col,
+                    pos_col=pos_col,
+                    model_col=model_col,
+                    mkt_place_col=mkt_place_col,
+                    win_col=win_col,
+                    ts_col=ts_col,
+                )
+                if rec is not None:
+                    records.append(rec)
+
         return records
     finally:
         con.close()
