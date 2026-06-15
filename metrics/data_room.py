@@ -60,9 +60,15 @@ def institutional_gates(
     max_brier_delta_vs_market: float = 0.0,
     oos_only: bool = True,
     oos_declared: bool = True,
+    oos_enforced: bool = False,
+    train_cutoff: Optional[str] = None,
     venue_mapped_pct: Optional[float] = None,
     min_venue_mapped_pct: float = 0.95,
     target_kind: str = "1x2",
+    paired_events: Optional[int] = None,
+    min_paired_events: int = 0,
+    min_paired_pct: float = 0.95,
+    n_events_total: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Pass/fail gates for internal engineering vs institutional grade."""
     reasons: List[str] = []
@@ -72,6 +78,19 @@ def institutional_gates(
         reasons.append("oos_not_declared")
     if not oos_only:
         reasons.append("window_not_marked_oos")
+    if oos_only and oos_declared and train_cutoff and not oos_enforced:
+        reasons.append("oos_cutoff_not_enforced_in_code")
+    if paired_events is not None and min_paired_events > 0 and paired_events < min_paired_events:
+        reasons.append(f"paired_events={paired_events} < min_paired_events={min_paired_events}")
+    if (
+        paired_events is not None
+        and min_paired_pct > 0
+    ):
+        denom = n_events_total if n_events_total and n_events_total > 0 else n_events
+        if denom > 0 and (paired_events / denom) < min_paired_pct:
+            reasons.append(
+                f"paired_market_pct={paired_events / denom:.2%} < {min_paired_pct:.0%}"
+            )
     if model_brier is None:
         reasons.append("model_brier_missing")
     if market_brier is None:

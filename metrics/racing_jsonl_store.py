@@ -55,7 +55,7 @@ def append_records(
 
 
 def trim_jsonl(path: Path, *, max_races: int) -> Dict[str, int]:
-    """Keep the most recent ``max_races`` lines (by file order)."""
+    """Keep the most recent ``max_races`` lines (by race_date when known, else file order)."""
     if max_races <= 0 or not path.is_file():
         return {"before": 0, "after": 0, "trimmed": 0, "max_races": max_races}
     records = [r for r in load_jsonl(path) if r.get("race_id") and "_corrupt_line" not in r]
@@ -63,6 +63,9 @@ def trim_jsonl(path: Path, *, max_races: int) -> Dict[str, int]:
     if before <= max_races:
         span = window_span_from_records(records)
         return {"before": before, "after": before, "trimmed": 0, "max_races": max_races, **span}
+    dated = [r for r in records if r.get("race_date") or r.get("card_date")]
+    if len(dated) == len(records):
+        records.sort(key=lambda r: str(r.get("race_date") or r.get("card_date"))[:10])
     kept = records[-max_races:]
     span = window_span_from_records(kept)
     atomic_write_jsonl(path, kept)

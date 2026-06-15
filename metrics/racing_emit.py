@@ -62,13 +62,15 @@ def build_settled_race_record(
     venue_id: str = "",
     venue_mapped: bool = True,
     place_positions: int = 3,
+    race_date: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Canonical JSONL record for ``verify_racing_window.py`` / ``metrics.racing``."""
     if target not in ("win", "place"):
         raise ValueError(f"target must be win or place, got {target!r}")
     if not runners:
         raise ValueError("runners required")
-    return {
+    rec: Dict[str, Any] = {
         "race_id": str(race_id),
         "target": target,
         "place_positions": int(place_positions) if target == "place" else None,
@@ -76,6 +78,11 @@ def build_settled_race_record(
         "venue_mapped": bool(venue_mapped),
         "runners": runners,
     }
+    if race_date:
+        rec["race_date"] = str(race_date)[:10]
+    if meta:
+        rec["meta"] = meta
+    return rec
 
 
 def to_jsonl_line(record: Dict[str, Any]) -> str:

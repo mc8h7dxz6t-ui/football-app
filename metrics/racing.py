@@ -35,6 +35,8 @@ class RacingRecord:
     venue_id: str = ""
     venue_mapped: bool = True
     place_positions: int = 3
+    race_date: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
 
     def outcome_vector(self) -> List[int]:
         if self.target == "win":
@@ -78,6 +80,8 @@ def racing_record_from_dict(raw: Dict[str, Any], *, validate: bool = True) -> Ra
         venue_id=str(raw.get("venue_id", "")),
         venue_mapped=bool(raw.get("venue_mapped", True)),
         place_positions=int(raw.get("place_positions", 3)),
+        race_date=str(raw["race_date"])[:10] if raw.get("race_date") else None,
+        meta=raw.get("meta") if isinstance(raw.get("meta"), dict) else None,
     )
 
 
@@ -139,7 +143,10 @@ def evaluate_racing_window(
     bins: int = 10,
     oos_only: bool = True,
     oos_declared: bool = True,
+    oos_enforced: bool = False,
     train_cutoff: Optional[str] = None,
+    require_paired_market: bool = True,
+    min_paired_pct: float = 0.95,
     generated_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Institutional racing window — win or place target, venue mapping, market benchmark."""
@@ -152,20 +159,31 @@ def evaluate_racing_window(
     if any(r.target != target for r in races):
         return {"error": "mixed_targets", "n_races": len(races)}
 
-    n_races = len(races)
-    venue = venue_mapping_summary(races)
-    macro_model = _macro_brier_per_race(races, use_market=False)
-    macro_market = _macro_brier_per_race(races, use_market=True)
+    n_races_total = len(races)
+    paired_races = [r for r in races if r.market_probs() is not None]
+    n_paired = len(paired_races)
+    paired_pct = round(n_paired / n_races_total, 4) if n_races_total else 0.0
+
+    eval_races = paired_races if (require_paired_market and target == "place") else list(races)
+    if require_paired_market and target == "place" and not eval_races:
+        return {
+            "error": "no_paired_races",
+            "n_races": n_races_total,
+            "n_paired_market": 0,
+        }
+
+    n_races = len(eval_races)
+    venue = venue_mapping_summary(eval_races)
+    macro_model = _macro_brier_per_race(eval_races, use_market=False)
+    macro_market = _macro_brier_per_race(eval_races, use_market=True)
     delta = (
         round(macro_model - macro_market, 4)
         if macro_model is not None and macro_market is not None
         else None
     )
 
-    model_legs = _runner_leg_calibration_records(races, use_market=False)
-    market_legs = _runner_leg_calibration_records(
-        [r for r in races if r.market_probs() is not None], use_market=True
-    )
+    model_legs = _runner_leg_calibration_records(eval_races, use_market=False)
+    market_legs = _runner_leg_calibration_records(eval_races, use_market=True)
     leg_keys = ("hit", "miss")
 
     model_eval = evaluate_multiclass(model_legs, keys=leg_keys, bins=bins)
@@ -178,8 +196,36 @@ def evaluate_racing_window(
         min_events=min_races,
         oos_only=oos_only,
         oos_declared=oos_declared,
+        oos_enforced=oos_enforced,
         venue_mapped_pct=venue.get("mapped_pct"),
         target_kind=target,
+        train_cutoff=train_cutoff,
+        paired_events=n_paired if require_paired_market and target == "place" else None,
+        min_paired_events=min_races if require_paired_market and target == "place" else 0,
+        min_paired_pct=min_paired_pct,
+        n_events_total=n_races_total,
+    )
+
+    from metrics.racing_measurement import measurement_contract_summary
+
+    contract = measurement_contract_summary(
+        [
+            {
+                "race_id": r.race_id,
+                "target": r.target,
+                "race_date": r.race_date,
+                "runners": [
+                    {
+                        "runner_id": x.runner_id,
+                        "model_prob": x.model_prob,
+                        "market_prob": x.market_prob,
+                    }
+                    for x in r.runners
+                ],
+                "meta": r.meta,
+            }
+            for r in races
+        ]
     )
 
     ts = generated_at or datetime.now(timezone.utc).isoformat()
@@ -193,18 +239,23 @@ def evaluate_racing_window(
             "description": (
                 "Single winner per race — macro Brier (1/R) sum (f_i - o_i)^2"
                 if target == "win"
-                else "Place finisher — binary Brier per runner on P(place); multiple placers allowed"
+                else "Place finisher — binary Brier per runner on P(place); paired place market only"
             ),
         },
         "window": {
             "type": "rolling",
             "min_events": min_races,
             "n_events": n_races,
-            "n_paired_market": sum(1 for r in races if r.market_probs() is not None),
+            "n_events_total": n_races_total,
+            "n_paired_market": n_paired,
+            "paired_market_pct": paired_pct,
+            "require_paired_market": require_paired_market and target == "place",
             "oos_only": oos_only,
             "oos_declared": oos_declared,
+            "oos_enforced": oos_enforced,
             "train_cutoff": train_cutoff,
         },
+        "measurement_contract": contract,
         "model": {
             "macro_brier_per_race": round(macro_model, 4) if macro_model is not None else None,
             "murphy_runner_legs": model_eval["murphy"],

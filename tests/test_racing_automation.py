@@ -60,6 +60,7 @@ def test_pipeline_accumulating(feature_store, tmp_path):
         state_path=tmp_path / "state.json",
         lock_path=tmp_path / ".lock",
         min_races_for_verify=1000,
+        require_paired_place_market=False,
     )
     report = run_racing_verification_pipeline(cfg, use_lock=False)
     assert report["ok"] is True
@@ -77,6 +78,7 @@ def test_pipeline_idempotent(feature_store, tmp_path):
         data_room_path=tmp_path / "data_room.json",
         state_path=tmp_path / "state.json",
         lock_path=tmp_path / ".lock",
+        require_paired_place_market=False,
     )
     r1 = run_racing_verification_pipeline(cfg, use_lock=False)
     r2 = run_racing_verification_pipeline(cfg, use_lock=False)
@@ -99,6 +101,7 @@ def test_skip_preserves_last_full_run(feature_store, tmp_path):
         state_path=tmp_path / "state.json",
         lock_path=tmp_path / ".lock",
         min_races_for_verify=1000,
+        require_paired_place_market=False,
     )
     first = run_racing_verification_pipeline(cfg, use_lock=False)
     assert first["run_outcome"] == "completed"

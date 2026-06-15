@@ -65,7 +65,9 @@ def test_jsonl_line_roundtrip():
 
 
 def test_extract_from_feature_store(feature_store):
-    races = extract_settled_races_from_db(feature_store, target="place")
+    races = extract_settled_races_from_db(
+        feature_store, target="place", require_paired_place_market=False
+    )
     assert len(races) == 1
     assert races[0]["race_id"] == "r1"
     assert len(races[0]["runners"]) == 4
@@ -87,24 +89,25 @@ def scored_snapshots_db(tmp_path):
             course TEXT,
             field_size INTEGER,
             win_decimal REAL,
+            offered_place_decimal REAL,
             places INTEGER,
             model_score REAL,
             model_place_prob REAL,
             finish_pos INTEGER,
-            scored_at TEXT
+            scored_at TEXT,
+            odds_source TEXT,
+            config_hash TEXT
         )
         """
     )
     rows = [
-        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.8, 0.45, 1, "2026-06-01T10:00:00+00:00"),
-        ("2026-06-01", "r1:h2", "rac_1", "Carlisle", 3, 5.0, 3, 0.6, 0.35, 2, "2026-06-01T10:00:00+00:00"),
-        ("2026-06-01", "r1:h3", "rac_1", "Carlisle", 3, 8.0, 3, 0.4, 0.20, 4, "2026-06-01T10:00:00+00:00"),
-        # duplicate snapshot — older score should lose to newer row below
-        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.1, 0.10, 1, "2026-06-01T09:00:00+00:00"),
-        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.9, 0.50, 1, "2026-06-01T11:00:00+00:00"),
+        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3.5, 3, 0.8, 0.45, 1, "2026-06-01T11:00:00+00:00", "racing_api", "cfg1"),
+        ("2026-06-01", "r1:h2", "rac_1", "Carlisle", 3, 5.0, 4.0, 3, 0.6, 0.35, 2, "2026-06-01T10:00:00+00:00", "racing_api", "cfg1"),
+        ("2026-06-01", "r1:h3", "rac_1", "Carlisle", 3, 8.0, 6.0, 3, 0.4, 0.20, 4, "2026-06-01T10:00:00+00:00", "racing_api", "cfg1"),
+        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3.5, 3, 0.1, 0.10, 1, "2026-06-01T09:00:00+00:00", "racing_api", "cfg1"),
     ]
     con.executemany(
-        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
     con.commit()
@@ -120,6 +123,8 @@ def test_extract_from_scored_runner_snapshots(scored_snapshots_db):
     )
     assert len(races) == 1
     assert races[0]["race_id"] == "rac_1"
+    assert races[0]["race_date"] == "2026-06-01"
+    assert races[0]["meta"]["paired_benchmark_only"] is True
     assert races[0]["venue_id"] == "Carlisle"
     assert races[0]["place_positions"] == 3
     assert len(races[0]["runners"]) == 3
@@ -128,8 +133,39 @@ def test_extract_from_scored_runner_snapshots(scored_snapshots_db):
     assert by_id["r1:h1"]["placed"] is True
     assert by_id["r1:h2"]["placed"] is True
     assert by_id["r1:h3"]["placed"] is False
-    # latest scored_at row kept for h1 (0.50 raw → normalized)
-    assert by_id["r1:h1"]["model_prob"] > by_id["r1:h2"]["model_prob"]
+    # latest scored_at row kept for h1; place prob not field-normalized
+    assert by_id["r1:h1"]["model_prob"] == 0.45
+    assert by_id["r1:h1"]["market_prob"] is not None
+
+
+def test_extract_ignores_heavy_json_columns(tmp_path):
+    """Projected SELECT must skip manifest_json-sized blobs on snapshots."""
+    db = tmp_path / "heavy.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        """
+        CREATE TABLE scored_runner_snapshots (
+            race_id TEXT, runner_id TEXT, course TEXT, places INTEGER,
+            finish_pos INTEGER, model_place_prob REAL, offered_place_decimal REAL,
+            scored_at TEXT, manifest_json TEXT
+        )
+        """
+    )
+    blob = "x" * 500_000
+    rows = [
+        ("rac_1", "h1", "York", 3, 1, 0.5, 2.5, "2026-06-01T12:00:00+00:00", blob),
+        ("rac_1", "h2", "York", 3, 2, 0.3, 3.0, "2026-06-01T12:00:00+00:00", blob),
+        ("rac_1", "h3", "York", 3, 4, 0.2, 5.0, "2026-06-01T12:00:00+00:00", blob),
+    ]
+    con.executemany(
+        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    con.commit()
+    con.close()
+    races = extract_settled_races_from_db(db, table="scored_runner_snapshots", target="place")
+    assert len(races) == 1
+    assert len(races[0]["runners"]) == 3
 
 
 def test_hook_emit(tmp_path):

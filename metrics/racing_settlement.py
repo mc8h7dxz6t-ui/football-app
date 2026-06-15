@@ -38,7 +38,7 @@ def resolve_writer_columns(con: sqlite3.Connection, table: str) -> Dict[str, Opt
     return {
         "race_id": _pick(cols, RACE_ID_COLS),
         "runner_id": _pick(cols, RUNNER_ID_COLS),
-        "position": _pick(cols, POSITION_COLS) or "finish_position",
+        "position": _pick(cols, POSITION_COLS),
         "score": _pick(cols, MODEL_PROB_COLS),
         "venue_id": _pick(cols, VENUE_COLS),
         "venue_mapped": _pick(cols, VENUE_MAPPED_COLS),
@@ -82,6 +82,8 @@ def _apply_race_on_connection(
     race_col = wcols["race_id"]
     runner_col = wcols["runner_id"]
     pos_col = wcols["position"]
+    if not race_col or not runner_col or not pos_col:
+        raise ValueError(f"{src} missing race_id, runner_id, or position column")
     score_col = wcols["score"]
 
     updated = 0
@@ -278,7 +280,9 @@ def settlement_coverage(db_path: str | Path, *, table: Optional[str] = None) -> 
         if w["position"]:
             with_pos = int(
                 con.execute(
-                    f"SELECT COUNT(*) FROM [{src}] WHERE [{w['position']}] IS NOT NULL AND [{w['position']}] > 0"
+                    f"SELECT COUNT(*) FROM [{src}] "
+                    f"WHERE [{w['position']}] IS NOT NULL "
+                    f"AND CAST([{w['position']}] AS REAL) > 0"
                 ).fetchone()[0]
             )
         if w["score"]:
@@ -293,7 +297,7 @@ def settlement_coverage(db_path: str | Path, *, table: Optional[str] = None) -> 
                 con.execute(
                     f"""
                     SELECT COUNT(DISTINCT [{w['race_id']}]) FROM [{src}]
-                    WHERE [{w['position']}] IS NOT NULL AND [{w['position']}] > 0
+                    WHERE [{w['position']}] IS NOT NULL AND CAST([{w['position']}] AS REAL) > 0
                     """
                 ).fetchone()[0]
             )

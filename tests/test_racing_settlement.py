@@ -104,3 +104,31 @@ def test_batch_settle_from_json(db):
     out = apply_results_batch(db, payload)
     assert out["rows_updated"] == 3
     assert out["transaction"] == "single"
+
+
+def test_settlement_coverage_scored_snapshots_finish_pos(tmp_path):
+    """hibs-racing snapshots use finish_pos — must not assume finish_position."""
+    path = tmp_path / "fs.sqlite"
+    con = sqlite3.connect(path)
+    con.execute(
+        """
+        CREATE TABLE scored_runner_snapshots (
+            race_id TEXT, runner_id TEXT, finish_pos INTEGER, model_place_prob REAL
+        )
+        """
+    )
+    con.executemany(
+        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?)",
+        [
+            ("rac_1", "h1", 1, 0.4),
+            ("rac_1", "h2", 2, 0.35),
+            ("rac_1", "h3", None, 0.25),
+        ],
+    )
+    con.commit()
+    con.close()
+    cov = settlement_coverage(path, table="scored_runner_snapshots")
+    assert cov["ok"] is True
+    assert cov["table"] == "scored_runner_snapshots"
+    assert cov["runners_with_position"] == 2
+    assert cov["runners_with_score"] == 3
