@@ -30,13 +30,51 @@ pip install -r requirements-xg.txt    # optional Understat xG (heavy)
 | Task | Command |
 |------|---------|
 | Unit tests | `pytest -q` |
+| Institutional metrics | `docs/INSTITUTIONAL_VERIFICATION.md` |
+| Racing JSONL emit | `scripts/emit_racing_verification_jsonl.py` (feature_store → settled_races.jsonl) |
+| Racing automation | `scripts/racing_verification_automation.sh --run` (cron-safe flock + data room) |
+| Feature store writes | `scripts/feature_store_write_guard.sh <cmd>` — shared flock with verification settlement |
+| Guard verify (VPS) | `sudo CRON_USER=www-data bash scripts/verify_production_guards.sh` |
 | Streamlit UI | `streamlit run app.py` → http://localhost:8501 |
 | Headless engine demo (no API) | `python3 run_backtest.py --simulate 6000` |
 | Live scan/backtest | Requires `API_SPORTS_KEY` (or `API_FOOTBALL_KEY`) env var or `.streamlit/secrets.toml` |
 
 ### API key
 
-Live fixture/odds data needs a free [API-Football](https://www.api-football.com) key. Without it, Streamlit shows an error and stops before the Value Scan / Backtest tabs. Copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` to configure locally.
+Live fixture/odds data needs a free [API-Football](https://www.api-football.com) key. Optional [The Odds API](https://the-odds-api.com) key (`ODDS_API_KEY`) widens book coverage and powers the **Racing Shop** tab. Copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` to configure locally.
+
+Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge in `odds_sources.py`.
+
+### Inst++ stack (optional)
+
+| Component | Command / path |
+|-----------|----------------|
+| Pro deps | `pip install -r requirements-pro.txt` |
+| API | `uvicorn api.main:app --port 8000` |
+| Hands-off stack | `cp .env.example .env` → `bash scripts/run_stack.sh` (Redis + API + auto worker + UI) |
+| Arb shadow (frozen) | `docker compose --profile arb-shadow up -d` — see `docs/ARB_FREEZE.md` |
+| Ingest worker | `python worker.py --auto` (discover fixtures) or `--fixtures 'key:id:matchbook_id'` |
+| Preflight | `bash scripts/preflight_fve.sh` — budgets + optional line cache check |
+| Exchange poll override | `FEED_POLL_SEC_MATCHBOOK=0.5` |
+| Intra-window peaks | Redis **ZSET** rings per market; `PEAK_ODDS_WINDOW_SEC=5` |
+| Async scheduler | Default in `worker.py`; `--sync` for blocking loop |
+| Celery (optional) | `celery -A tasks.celery_app worker -B` |
+| Redis | `docker compose up -d redis` — set `REDIS_URL` |
+| Matchbook | `MATCHBOOK_USERNAME` + `MATCHBOOK_PASSWORD` |
+
+Streamlit should use `FVE_API_URL=http://localhost:8000` when the ingest layer is running.
+
+### WebSocket line hub + API budgets
+
+| Item | Detail |
+|------|--------|
+| WS endpoint | `ws://localhost:8000/ws/lines/{fixture_key}` — snapshot on connect, `update` on tick change |
+| Cross-process | Worker + API must share `REDIS_URL` (line_bus pub/sub) |
+| Odds API feed | `ENABLE_ODDS_API_FEED=1` only when quota allows; default poll 300s |
+| Shared quotas | `FVE_MATCHBOOK_MAX_CALLS_PER_HOUR`, `FVE_ODDS_API_MAX_CALLS_PER_HOUR` (default **15**), `FVE_API_FOOTBALL_MAX_CALLS_PER_HOUR` |
+| Health | `GET /health` → `api_budgets`, `line_bus` |
+
+Architecture roadmap (Institutional++ vs what we actually need): `docs/ARCHITECTURE.md`.
 
 ### Linting
 

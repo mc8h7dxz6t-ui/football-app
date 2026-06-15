@@ -175,41 +175,15 @@ def goal_model(
     }
 
 
-def extract_best(odds_json: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """Best decimal odds per market across bookmakers (line shopping)."""
-    best = {
-        "Home": {"odds": 0.0},
-        "Draw": {"odds": 0.0},
-        "Away": {"odds": 0.0},
-        "Over2.5": {"odds": 0.0},
-        "BTTS": {"odds": 0.0},
-    }
-    try:
-        bookmakers = odds_json["response"][0]["bookmakers"]
-    except (KeyError, IndexError, TypeError):
-        return best
+def extract_best(odds_json: Dict[str, Any], *, event_label: str = "") -> Dict[str, Dict[str, Any]]:
+    """Best decimal odds per market across bookmakers (line shopping).
 
-    for b in bookmakers:
-        for market in b.get("bets", []):
-            name = str(market.get("name", "")).lower()
-            for outcome in market.get("values", []):
-                val = str(outcome.get("value", "")).lower()
-                try:
-                    odd = float(outcome.get("odd"))
-                except (TypeError, ValueError):
-                    continue
-                if "match winner" in name:
-                    if val == "home":
-                        best["Home"]["odds"] = max(best["Home"]["odds"], odd)
-                    elif val == "draw":
-                        best["Draw"]["odds"] = max(best["Draw"]["odds"], odd)
-                    elif val == "away":
-                        best["Away"]["odds"] = max(best["Away"]["odds"], odd)
-                if "over/under" in name and "2.5" in val and "over" in val:
-                    best["Over2.5"]["odds"] = max(best["Over2.5"]["odds"], odd)
-                if "both teams score" in name and val == "yes":
-                    best["BTTS"]["odds"] = max(best["BTTS"]["odds"], odd)
-    return best
+    Delegates to ``odds_shopping``; each market includes bookmaker name, category,
+  source, and a place-bet URL.
+    """
+    from odds_shopping import extract_best as _extract_best
+
+    return _extract_best(odds_json, event_label=event_label)
 
 
 def edge(prob: float, odds: float) -> float:

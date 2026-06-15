@@ -17,6 +17,7 @@ environment variable **or** Streamlit secrets — it is never hard-coded:
 
 ```bash
 export API_SPORTS_KEY="your_key_here"
+export ODDS_API_KEY="your_key_here"   # optional — extra books + racing shop
 ```
 
 or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitignored) and fill it in.
@@ -31,8 +32,99 @@ or copy `.streamlit/secrets.toml.example` → `.streamlit/secrets.toml` (gitigno
 streamlit run app.py
 ```
 
+> **Paused:** FVE live ingest is off while **hibs-bet** owns shared API keys. See `docs/PAUSED.md`.
+> Run `bash scripts/pause_fve.sh` on any machine. Use `~/Applications` (hibs-bet) for live football.
+
+### Inst++ pipeline (hands-off — when unpaused)
+
+One command starts Redis, API, **auto watchlist worker**, and Streamlit:
+
+```bash
+cp .env.example .env    # set API_SPORTS_KEY (required)
+bash scripts/run_stack.sh
+```
+
+Open http://localhost:8501 → sidebar **Use FastAPI ingest layer**. The worker discovers
+upcoming fixtures from API-Football every hour (`FVE_WATCHLIST_DAYS=3` by default).
+
+**Matchbook exchange lines:** copy `config/matchbook_map.json.example` → `config/matchbook_map.json`
+and add `Home v Away` → event id keys.
+
+**Daily corruption check:**
+
+```bash
+bash scripts/preflight_fve.sh
+bash scripts/install_cron_fve.sh   # optional 06:15 UTC cron
+```
+
+Manual / dev mode:
+
+```bash
+pip install -r requirements-pro.txt
+docker compose up -d redis
+uvicorn api.main:app --port 8000
+python worker.py --auto
+# or: python worker.py --fixtures "Arsenal v Chelsea:12345:67890"
+streamlit run app.py
+```
+
+```
+Matchbook / API-Football feeds
+        → async worker (250ms scheduler) → Redis ZSET tick rings
+        → Shin de-vig sharp synthetic line
+        → Postgres snapshots (optional)
+        → FastAPI /ingest /lines /value-scan /ws/lines/{fixture}
+        → Streamlit / React frontend
+```
+
+**WebSocket (no book API polling from UI):**
+
+```bash
+# ws://localhost:8000/ws/lines/Arsenal%20v%20Chelsea
+# Send "ping" or "snapshot" as text; receive snapshot | update | pong
+```
+
+**Protect shared API keys** (Matchbook + Odds API used across repos):
+
+```bash
+export FVE_ODDS_API_MAX_CALLS_PER_HOUR=15      # conservative default
+export FVE_MATCHBOOK_MAX_CALLS_PER_HOUR=1200
+export ENABLE_ODDS_API_FEED=0                  # keep Odds API feed off unless needed
+```
+
+See `docs/ARCHITECTURE.md` for Institutional++ upgrade path vs current Python stack.
+
+**Sharp benchmark:** picks where your Poisson model shows edge but the **de-vigged
+exchange/sharp line** disagrees are flagged as likely hallucinations and filtered out.
+
+**Circuit breakers:** failed feeds fall back to cached lines instead of crashing the UI.
+
+### Matchbook arb execution (optional — real money)
+
+Scans cross-book 1X2 dutch arbs and can place **Matchbook legs only** via Edge API.
+
+```bash
+# Always starts in DRY-RUN (logs offers, does not bet)
+python arb_worker.py --fixtures "Arsenal v Chelsea:12345:67890" --execute
+
+# LIVE — requires both flags + small stake caps
+export MATCHBOOK_AUTO_TRADE=1
+export MATCHBOOK_CONFIRM_LIVE=YES
+export MATCHBOOK_MAX_STAKE=2.00
+export MATCHBOOK_MAX_OUTLAY=6.00
+export ARB_MIN_PROFIT_PCT=0.5
+python arb_worker.py --fixtures "..." --execute
+```
+
+API: `GET /arb/{fixture_key}` · `POST /arb/execute`
+
+> **Risk:** Partial dutch (legs on other books) is **not** locked profit unless you place all legs.
+> Default blocks partial auto-exec unless `MATCHBOOK_ALLOW_PARTIAL_DUTCH=1`.
+
 - **Value Scan** — set bankroll / min edge % / Kelly fraction (sidebar), pick leagues and
-  season, choose days ahead, then **Run Scan**. Results are sorted by edge.
+  season, choose days ahead, then **Run Scan**. Results show **bookmaker**, **exchange vs
+  soft prices**, **bet links**, and edge sorted by your chosen shopping channel.
+- **Racing Shop** — win-market line shop (UK / US / AU) when `ODDS_API_KEY` is set.
 - **Backtest** — replays recent finished fixtures, settles them against real scores, and
   reports **Brier score, log loss, top-pick accuracy** and a **calibration table**.
 
@@ -46,7 +138,9 @@ can't contradict each other:
   are present it blends xG with actual goals (`XG_BLEND_ALPHA`, default 0.6) — xG is more
   stable/predictive than raw goals. Toggle "Blend xG" in the sidebar (`use_xg`).
 - **match_model / goal_model** — 1X2, Over 2.5 and BTTS from the same Poisson score grid.
-- **extract_best** — best decimal odds per market across bookmakers (line shopping).
+- **Line shopping** (`odds_shopping.py`) — best price per market with **bookmaker name**,
+  **exchange vs soft vs sharp** channels, **place-bet links**, and optional merge with
+  **The Odds API** for broader football + **horse racing** coverage.
 - **edge / kelly** — expected value % and fractional-Kelly stake.
 
 API responses are cached (`st.cache_data`) to respect free-tier rate limits, and every
@@ -73,11 +167,19 @@ matches teams to the table by normalised name, and blends it into expected goals
 Non-big-5 leagues degrade gracefully to goals-only. Verified live (EPL 2025/26 → 20
 teams, e.g. Man City ~2.1 xGF/g, Arsenal ~0.9 xGA/g).
 
-## Calibration (`backtest.py`)
+## Calibration (`backtest.py` + `metrics/`)
 
-Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, `top_pick_accuracy`,
-`calibration_table`, and `evaluate`. The uniform 1/3 baseline Brier is ~0.667 — beating
-it is the bar for "the model has signal."
+Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, top-pick accuracy,
+**Murphy decomposition** (reliability / resolution / uncertainty), all-legs calibration,
+and institutional **data room export** (`bt.export_data_room`). See `docs/INSTITUTIONAL_VERIFICATION.md`.
+
+The uniform 1/3 baseline Brier is ~0.667 — beating it is the bar for "the model has signal."
+Institutional grade requires **n ≥ 1,000** OOS events and model Brier ≤ market on the same window.
+
+```bash
+python run_backtest.py --simulate 6000 --data-room --data-room-out data_room.json
+python scripts/verify_racing_window.py --input config/racing_verification.example.jsonl
+```
 
 The in-app **Backtest** tab can also compare the model against the **de-vigged market**
 (`evaluate_vs_market`) and run a flat-stake **value-bet ROI** (`roi_backtest`).
