@@ -17,6 +17,7 @@ import os
 import random
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
@@ -106,6 +107,7 @@ def run(days: int, leagues: List[int], season: int, min_edge: float, use_xg: boo
                    "with_odds": with_odds, "min_edge": min_edge, "api_calls": calls,
                    "xg_teams_matched": xg_matched},
         "calibration": bt.evaluate(records),
+        "_records": records,
     }
     if with_odds:
         out["vs_market"] = bt.evaluate_vs_market(records)
@@ -193,6 +195,7 @@ def simulate(n: int, *, seed: int, min_edge: float, vig: float, market_noise: fl
         "calibration": bt.evaluate(records),
         "vs_market": bt.evaluate_vs_market(records),
         "value_roi": bt.roi_backtest(bets),
+        "_records": records,
     }
 
 
@@ -208,16 +211,32 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--vig", type=float, default=0.05)
     ap.add_argument("--market-noise", type=float, default=0.0, help="0 = sharp book; higher = softer book")
+    ap.add_argument("--data-room", action="store_true", help="append institutional data room export")
+    ap.add_argument("--data-room-out", type=str, default="", help="write data room JSON to path")
+    ap.add_argument("--in-sample", action="store_true", help="mark data room as in-sample (gates fail)")
     args = ap.parse_args()
 
     if args.simulate > 0:
-        print(json.dumps(
-            simulate(args.simulate, seed=args.seed, min_edge=args.min_edge,
-                     vig=args.vig, market_noise=args.market_noise), indent=2))
-        return
+        result = simulate(
+            args.simulate, seed=args.seed, min_edge=args.min_edge,
+            vig=args.vig, market_noise=args.market_noise,
+        )
+    else:
+        leagues = [int(x) for x in args.leagues.split(",") if x.strip()]
+        result = run(args.days, leagues, args.season, args.min_edge, args.use_xg, args.with_odds)
 
-    leagues = [int(x) for x in args.leagues.split(",") if x.strip()]
-    print(json.dumps(run(args.days, leagues, args.season, args.min_edge, args.use_xg, args.with_odds), indent=2))
+    if args.data_room:
+        result["data_room"] = bt.export_data_room(
+            result.get("_records", []),
+            min_events=1000,
+            oos_declared=not args.in_sample,
+            extra=result.get("params"),
+        )
+    if args.data_room_out and result.get("data_room"):
+        Path(args.data_room_out).write_text(json.dumps(result["data_room"], indent=2), encoding="utf-8")
+
+    result.pop("_records", None)
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

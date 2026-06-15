@@ -167,11 +167,19 @@ matches teams to the table by normalised name, and blends it into expected goals
 Non-big-5 leagues degrade gracefully to goals-only. Verified live (EPL 2025/26 → 20
 teams, e.g. Man City ~2.1 xGF/g, Arsenal ~0.9 xGA/g).
 
-## Calibration (`backtest.py`)
+## Calibration (`backtest.py` + `metrics/`)
 
-Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, `top_pick_accuracy`,
-`calibration_table`, and `evaluate`. The uniform 1/3 baseline Brier is ~0.667 — beating
-it is the bar for "the model has signal."
+Pure, dependency-free metrics: `brier_score_1x2`, `log_loss_1x2`, top-pick accuracy,
+**Murphy decomposition** (reliability / resolution / uncertainty), all-legs calibration,
+and institutional **data room export** (`bt.export_data_room`). See `docs/INSTITUTIONAL_VERIFICATION.md`.
+
+The uniform 1/3 baseline Brier is ~0.667 — beating it is the bar for "the model has signal."
+Institutional grade requires **n ≥ 1,000** OOS events and model Brier ≤ market on the same window.
+
+```bash
+python run_backtest.py --simulate 6000 --data-room --data-room-out data_room.json
+python scripts/verify_racing_window.py --input config/racing_verification.example.jsonl
+```
 
 The in-app **Backtest** tab can also compare the model against the **de-vigged market**
 (`evaluate_vs_market`) and run a flat-stake **value-bet ROI** (`roi_backtest`).

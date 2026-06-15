@@ -30,6 +30,7 @@ pip install -r requirements-xg.txt    # optional Understat xG (heavy)
 | Task | Command |
 |------|---------|
 | Unit tests | `pytest -q` |
+| Institutional metrics | `docs/INSTITUTIONAL_VERIFICATION.md` |
 | Streamlit UI | `streamlit run app.py` → http://localhost:8501 |
 | Headless engine demo (no API) | `python3 run_backtest.py --simulate 6000` |
 | Live scan/backtest | Requires `API_SPORTS_KEY` (or `API_FOOTBALL_KEY`) env var or `.streamlit/secrets.toml` |

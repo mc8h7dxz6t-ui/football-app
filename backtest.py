@@ -1,20 +1,18 @@
 """Pure calibration / backtest metrics for 1X2 predictions (no Streamlit / no I/O).
 
-Brings the institutional discipline of *proving* a model to the football engine:
-- Brier score and log loss vs realised outcomes,
-- top-pick accuracy,
-- a reliability (calibration) table.
-
+Football-facing facade over ``metrics/`` — institutional Brier, Murphy, data room.
 A "record" is ``{"probs": {"Home": .., "Draw": .., "Away": ..}, "outcome": "Home"|"Draw"|"Away"}``.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional, Sequence
 
+from metrics.brier import brier_macro, log_loss_macro, normalize_probs
+from metrics.calibration import calibration_table_top_pick
+from metrics.data_room import build_data_room_export, evaluate_multiclass
+
 OUTCOMES = ("Home", "Draw", "Away")
-_LOG_CLIP = 1e-12
 
 
 def settle_1x2(home_goals: int, away_goals: int) -> str:
@@ -26,9 +24,7 @@ def settle_1x2(home_goals: int, away_goals: int) -> str:
 
 
 def _normalised(probs: Dict[str, float]) -> Dict[str, float]:
-    vals = {k: max(float(probs.get(k, 0.0)), 0.0) for k in OUTCOMES}
-    total = sum(vals.values()) or 1.0
-    return {k: v / total for k, v in vals.items()}
+    return normalize_probs(probs, OUTCOMES)
 
 
 def implied_probs_1x2(odds_home: float, odds_draw: float, odds_away: float) -> Optional[Dict[str, float]]:
@@ -44,32 +40,14 @@ def implied_probs_1x2(odds_home: float, odds_draw: float, odds_away: float) -> O
 
 
 def brier_score_1x2(records: Sequence[Dict[str, Any]], *, field: str = "probs") -> Optional[float]:
-    """Mean multiclass Brier score (0 best, 2 worst). None if no usable records."""
-    rows = [r for r in records if r.get(field)]
-    if not rows:
-        return None
-    total = 0.0
-    for rec in rows:
-        p = _normalised(rec[field])
-        y = rec["outcome"]
-        total += sum((p[k] - (1.0 if k == y else 0.0)) ** 2 for k in OUTCOMES)
-    return total / len(rows)
+    return brier_macro(records, prob_field=field, outcome_field="outcome", keys=OUTCOMES)
 
 
 def log_loss_1x2(records: Sequence[Dict[str, Any]], *, field: str = "probs") -> Optional[float]:
-    """Mean negative log-likelihood of the realised outcome. None if no usable records."""
-    rows = [r for r in records if r.get(field)]
-    if not rows:
-        return None
-    total = 0.0
-    for rec in rows:
-        p = _normalised(rec[field])
-        total += -math.log(min(max(p[rec["outcome"]], _LOG_CLIP), 1.0))
-    return total / len(rows)
+    return log_loss_macro(records, prob_field=field, outcome_field="outcome", keys=OUTCOMES)
 
 
 def top_pick_accuracy(records: Sequence[Dict[str, Any]], *, field: str = "probs") -> Optional[float]:
-    """Fraction where the highest-probability outcome was the realised one (%)."""
     rows = [r for r in records if r.get(field)]
     if not rows:
         return None
@@ -81,60 +59,30 @@ def top_pick_accuracy(records: Sequence[Dict[str, Any]], *, field: str = "probs"
     return 100.0 * hits / len(rows)
 
 
-def calibration_table(records: Sequence[Dict[str, Any]], *, bins: int = 10, field: str = "probs") -> List[Dict[str, Any]]:
-    """Reliability table on the top-pick probability: predicted vs realised per bin."""
-    buckets: List[Dict[str, Any]] = [
-        {"bin_lo": i / bins, "bin_hi": (i + 1) / bins, "n": 0, "pred_sum": 0.0, "hits": 0}
-        for i in range(bins)
-    ]
-    for rec in records:
-        if not rec.get(field):
-            continue
-        p = _normalised(rec[field])
-        pick = max(OUTCOMES, key=lambda k: p[k])
-        conf = p[pick]
-        idx = min(int(conf * bins), bins - 1)
-        b = buckets[idx]
-        b["n"] += 1
-        b["pred_sum"] += conf
-        if pick == rec["outcome"]:
-            b["hits"] += 1
-    out = []
-    for b in buckets:
-        if b["n"] == 0:
-            continue
-        out.append(
-            {
-                "bin": f"{b['bin_lo']:.0%}-{b['bin_hi']:.0%}",
-                "n": b["n"],
-                "avg_predicted_pct": round(100.0 * b["pred_sum"] / b["n"], 2),
-                "actual_pct": round(100.0 * b["hits"] / b["n"], 2),
-            }
-        )
-    return out
+def calibration_table(
+    records: Sequence[Dict[str, Any]], *, bins: int = 10, field: str = "probs"
+) -> List[Dict[str, Any]]:
+    return calibration_table_top_pick(records, bins=bins, prob_field=field, outcome_field="outcome", keys=OUTCOMES)
 
 
 def evaluate(records: Sequence[Dict[str, Any]], *, bins: int = 10, field: str = "probs") -> Dict[str, Any]:
     """Headline calibration summary for a set of settled predictions."""
-    n = len([r for r in records if r.get(field)])
-    brier = brier_score_1x2(records, field=field)
+    full = evaluate_multiclass(
+        records, prob_field=field, outcome_field="outcome", keys=OUTCOMES, bins=bins
+    )
     return {
-        "n": n,
-        "brier_score": round(brier, 4) if brier is not None else None,
-        "log_loss": round(log_loss_1x2(records, field=field), 4) if n else None,
-        "top_pick_accuracy_pct": round(top_pick_accuracy(records, field=field), 2) if n else None,
-        # Uniform 1/3-1/3-1/3 baseline Brier is 0.667; beating it shows real signal.
-        "uniform_baseline_brier": 0.6667,
-        "calibration": calibration_table(records, bins=bins, field=field),
+        "n": full["n"],
+        "brier_score": full["brier_score"],
+        "log_loss": full["log_loss"],
+        "top_pick_accuracy_pct": round(top_pick_accuracy(records, field=field), 2) if full["n"] else None,
+        "uniform_baseline_brier": full["uniform_baseline_brier"],
+        "calibration": full["calibration_top_pick"],
+        "murphy": full["murphy"],
+        "calibration_all_legs": full["calibration_all_legs"],
     }
 
 
 def evaluate_vs_market(records: Sequence[Dict[str, Any]], *, bins: int = 10) -> Dict[str, Any]:
-    """Model vs de-vigged market on the SAME fixtures (records carry market_probs).
-
-    The market is the real benchmark; beating its Brier/log loss is the bar that
-    matters. Only fixtures with market odds are scored on both sides.
-    """
     paired = [r for r in records if r.get("probs") and r.get("market_probs")]
     model = evaluate(paired, bins=bins, field="probs")
     market = evaluate(paired, bins=bins, field="market_probs")
@@ -152,6 +100,32 @@ def evaluate_vs_market(records: Sequence[Dict[str, Any]], *, bins: int = 10) -> 
         ),
         "verdict": verdict,
     }
+
+
+def export_data_room(
+    records: Sequence[Dict[str, Any]],
+    *,
+    min_events: int = 1000,
+    oos_only: bool = True,
+    oos_declared: bool = True,
+    train_cutoff: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Football 1X2 institutional data room export."""
+    return build_data_room_export(
+        product="football",
+        target_kind="1x2",
+        records=records,
+        prob_field="probs",
+        market_field="market_probs",
+        outcome_field="outcome",
+        keys=OUTCOMES,
+        min_events=min_events,
+        oos_only=oos_only,
+        oos_declared=oos_declared,
+        train_cutoff=train_cutoff,
+        extra=extra,
+    )
 
 
 def roi_backtest(bets: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
