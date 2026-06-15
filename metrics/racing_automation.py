@@ -112,7 +112,7 @@ def resolve_automation_config(
         lock_path=lock,
         target=target,
         place_positions=int(os.environ.get("RACING_PLACE_POSITIONS", "3")),
-        table=os.environ.get("RACING_VERIFICATION_TABLE") or None,
+        table=(os.environ.get("RACING_VERIFICATION_TABLE") or "").strip() or None,
         max_races_in_file=int(os.environ.get("RACING_VERIFICATION_MAX_RACES", "2500")),
         min_races_for_verify=int(os.environ.get("RACING_VERIFICATION_MIN_RACES", "1000")),
     )

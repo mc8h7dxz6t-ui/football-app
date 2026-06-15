@@ -96,10 +96,12 @@ def _add_column_if_missing(
 def _upgrade_001_settlement_columns(con: sqlite3.Connection, table: str) -> None:
     """Add finish_position and score columns required for settlement writes."""
     cols = _columns(con, table)
-    pos_col = _pick(cols, POSITION_COLS) or "finish_position"
-    score_col = _pick(cols, MODEL_PROB_COLS) or "score"
-    _add_column_if_missing(con, table, pos_col, "INTEGER")
-    _add_column_if_missing(con, table, score_col, "REAL")
+    pos_col = _pick(cols, POSITION_COLS)
+    score_col = _pick(cols, MODEL_PROB_COLS)
+    if not pos_col:
+        _add_column_if_missing(con, table, "finish_position", "INTEGER")
+    if not score_col:
+        _add_column_if_missing(con, table, "score", "REAL")
 
 
 FEATURE_STORE_MIGRATIONS: List[MigrationSpec] = [
