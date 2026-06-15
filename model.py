@@ -1,9 +1,8 @@
 """Pure prediction model for the Football Value Engine (no Streamlit / no I/O).
 
-Coherent independent-Poisson model: 1X2, Over 2.5 and BTTS are all derived from the
-SAME pair of expected goals, so the markets cannot contradict each other. Expected
-goals use **venue splits** (home team's home form, away team's away form) with
-**shrinkage** toward overall form when the venue sample is thin.
+Institutional default: bivariate Poisson + Dixon–Coles on a joint scoreline matrix;
+1X2, Over 2.5 and BTTS are derivative sums (cannot contradict). Set
+``FVE_PRICING_MODE=independent`` for the legacy independent-Poisson grid.
 
 Importable + unit-testable without a running app.
 """
@@ -11,13 +10,17 @@ Importable + unit-testable without a running app.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Dict, Optional, Tuple
+
+from pricing.score_matrix import PricingConfig, build_score_matrix, derive_market_probs, institutional_mode_enabled
+from pricing.time_decay import blend_decay_with_aggregate
 
 # League-average goals per team per game; only used as a gentle prior fallback.
 DEFAULT_GOALS_PRIOR = 1.35
 # Pseudo-games for venue shrinkage: with few venue games, lean on overall form.
 VENUE_SHRINKAGE_GAMES = 4.0
-MAX_GOALS_GRID = 8
+MAX_GOALS_GRID = 10
 # Weight on the xG signal when blending with actual goals (xG is more stable/predictive).
 XG_BLEND_ALPHA = 0.6
 
@@ -71,11 +74,7 @@ def _overall_rate(team: Dict[str, Any], kind: str) -> float:
 
 
 def venue_rate(team: Dict[str, Any], venue: str, kind: str) -> float:
-    """Per-game goals `kind` ('for'|'against') at `venue` ('home'|'away'), shrunk to overall.
-
-    Falls back gracefully to overall form (and a league prior) when venue splits are
-    absent or the venue sample is small.
-    """
+    """Per-game goals `kind` ('for'|'against') at `venue` ('home'|'away'), shrunk to overall."""
     overall = _overall_rate(team, kind)
     vp = int(team.get(f"{venue}_played") or 0)
     if vp <= 0:
@@ -109,18 +108,33 @@ def blended_rate(team: Dict[str, Any], venue: str, kind: str, *, alpha: float = 
     return alpha * xg + (1.0 - alpha) * goals
 
 
+def _time_decay_half_life() -> float:
+    try:
+        return max(7.0, float(os.environ.get("FVE_TIME_DECAY_HALF_LIFE_DAYS", "45")))
+    except ValueError:
+        return 45.0
+
+
+def _time_decay_enabled() -> bool:
+    return os.environ.get("FVE_TIME_DECAY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def expected_goals(
     home: Dict[str, Any], away: Dict[str, Any], *, use_xg: bool = True, alpha: float = XG_BLEND_ALPHA
 ) -> Tuple[float, float]:
-    """Expected goals (home, away) from venue-aware attack/defence blends.
+    """Expected goals (home, away) from venue-aware attack/defence blends + optional time decay."""
+    rate_fn = (lambda t, v, k: blended_rate(t, v, k, alpha=alpha)) if use_xg else venue_rate
+    hl = _time_decay_half_life()
+    use_decay = _time_decay_enabled()
 
-    When ``use_xg`` and xG fields are present, attack/defence rates blend xG with
-    actual goals (weight ``alpha`` on xG); otherwise pure actual-goals form.
-    """
-    rate = (lambda t, v, k: blended_rate(t, v, k, alpha=alpha)) if use_xg else venue_rate
-    eh = (rate(home, "home", "for") + rate(away, "away", "against")) / 2.0
-    ea = (rate(away, "away", "for") + rate(home, "home", "against")) / 2.0
-    # Keep strictly positive and bounded for a stable Poisson.
+    def _rate(team: Dict[str, Any], venue: str, kind: str) -> float:
+        base = rate_fn(team, venue, kind)
+        if use_decay:
+            return blend_decay_with_aggregate(team, venue, kind, base, half_life_days=hl)
+        return base
+
+    eh = (_rate(home, "home", "for") + _rate(away, "away", "against")) / 2.0
+    ea = (_rate(away, "away", "for") + _rate(home, "home", "against")) / 2.0
     return (min(max(eh, 0.05), 6.0), min(max(ea, 0.05), 6.0))
 
 
@@ -128,19 +142,28 @@ def _poisson_pmf(k: int, lam: float) -> float:
     return math.exp(-lam) * lam**k / math.factorial(k)
 
 
-def _score_grid(eh: float, ea: float, max_goals: int = MAX_GOALS_GRID):
+def _score_grid_independent(eh: float, ea: float, max_goals: int):
     ph = [_poisson_pmf(i, eh) for i in range(max_goals + 1)]
     pa = [_poisson_pmf(j, ea) for j in range(max_goals + 1)]
     return ph, pa
 
 
-def match_model(
-    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+def _market_probs_from_lambdas(
+    eh: float,
+    ea: float,
+    *,
+    max_goals: int = MAX_GOALS_GRID,
+    use_xg: bool = True,
 ) -> Dict[str, float]:
-    """1X2 probabilities from an independent-Poisson score grid (normalised)."""
-    eh, ea = expected_goals(home, away, use_xg=use_xg)
-    ph, pa = _score_grid(eh, ea, max_goals)
+    if institutional_mode_enabled():
+        cfg = PricingConfig.from_env()
+        matrix = build_score_matrix(eh, ea, config=cfg)
+        return derive_market_probs(matrix)
+
+    ph, pa = _score_grid_independent(eh, ea, max_goals)
     home_p = draw_p = away_p = 0.0
+    over25 = 0.0
+    btts = 0.0
     for i in range(max_goals + 1):
         for j in range(max_goals + 1):
             p = ph[i] * pa[j]
@@ -150,37 +173,48 @@ def match_model(
                 draw_p += p
             else:
                 away_p += p
-    total = home_p + draw_p + away_p or 1.0
-    return {"Home": home_p / total, "Draw": draw_p / total, "Away": away_p / total}
-
-
-def goal_model(
-    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
-) -> Dict[str, float]:
-    """Over 2.5 and BTTS from the same expected-goals Poisson grid."""
-    eh, ea = expected_goals(home, away, use_xg=use_xg)
-    ph, pa = _score_grid(eh, ea, max_goals)
-    over25 = 0.0
-    btts = 0.0
-    for i in range(max_goals + 1):
-        for j in range(max_goals + 1):
-            p = ph[i] * pa[j]
             if i + j >= 3:
                 over25 += p
             if i >= 1 and j >= 1:
                 btts += p
+    total = home_p + draw_p + away_p or 1.0
     return {
+        "Home": home_p / total,
+        "Draw": draw_p / total,
+        "Away": away_p / total,
         "Over2.5": min(max(over25, 0.01), 0.99),
         "BTTS": min(max(btts, 0.01), 0.99),
     }
 
 
-def extract_best(odds_json: Dict[str, Any], *, event_label: str = "") -> Dict[str, Dict[str, Any]]:
-    """Best decimal odds per market across bookmakers (line shopping).
+def match_model(
+    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+) -> Dict[str, float]:
+    """1X2 probabilities from joint score matrix (institutional) or independent Poisson."""
+    eh, ea = expected_goals(home, away, use_xg=use_xg)
+    probs = _market_probs_from_lambdas(eh, ea, max_goals=max_goals, use_xg=use_xg)
+    return {"Home": probs["Home"], "Draw": probs["Draw"], "Away": probs["Away"]}
 
-    Delegates to ``odds_shopping``; each market includes bookmaker name, category,
-  source, and a place-bet URL.
-    """
+
+def goal_model(
+    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+) -> Dict[str, float]:
+    """Over 2.5 and BTTS from the same score matrix as 1X2."""
+    eh, ea = expected_goals(home, away, use_xg=use_xg)
+    probs = _market_probs_from_lambdas(eh, ea, max_goals=max_goals, use_xg=use_xg)
+    return {"Over2.5": probs["Over2.5"], "BTTS": probs["BTTS"]}
+
+
+def full_market_probs(
+    home: Dict[str, Any], away: Dict[str, Any], *, use_xg: bool = True
+) -> Dict[str, float]:
+    """All derivative markets from one λ pair — for cross-market checks."""
+    eh, ea = expected_goals(home, away, use_xg=use_xg)
+    return _market_probs_from_lambdas(eh, ea, use_xg=use_xg)
+
+
+def extract_best(odds_json: Dict[str, Any], *, event_label: str = "") -> Dict[str, Dict[str, Any]]:
+    """Best decimal odds per market across bookmakers (line shopping)."""
     from odds_shopping import extract_best as _extract_best
 
     return _extract_best(odds_json, event_label=event_label)
