@@ -73,6 +73,65 @@ def test_extract_from_feature_store(feature_store):
     assert races[0]["venue_id"] == "aintree"
 
 
+@pytest.fixture
+def scored_snapshots_db(tmp_path):
+    """hibs-racing scored_runner_snapshots shape (finish_pos + model_place_prob)."""
+    db = tmp_path / "feature_store.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        """
+        CREATE TABLE scored_runner_snapshots (
+            card_date TEXT,
+            runner_id TEXT,
+            race_id TEXT,
+            course TEXT,
+            field_size INTEGER,
+            win_decimal REAL,
+            places INTEGER,
+            model_score REAL,
+            model_place_prob REAL,
+            finish_pos INTEGER,
+            scored_at TEXT
+        )
+        """
+    )
+    rows = [
+        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.8, 0.45, 1, "2026-06-01T10:00:00+00:00"),
+        ("2026-06-01", "r1:h2", "rac_1", "Carlisle", 3, 5.0, 3, 0.6, 0.35, 2, "2026-06-01T10:00:00+00:00"),
+        ("2026-06-01", "r1:h3", "rac_1", "Carlisle", 3, 8.0, 3, 0.4, 0.20, 4, "2026-06-01T10:00:00+00:00"),
+        # duplicate snapshot — older score should lose to newer row below
+        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.1, 0.10, 1, "2026-06-01T09:00:00+00:00"),
+        ("2026-06-01", "r1:h1", "rac_1", "Carlisle", 3, 4.0, 3, 0.9, 0.50, 1, "2026-06-01T11:00:00+00:00"),
+    ]
+    con.executemany(
+        "INSERT INTO scored_runner_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_extract_from_scored_runner_snapshots(scored_snapshots_db):
+    races = extract_settled_races_from_db(
+        scored_snapshots_db,
+        target="place",
+        table="scored_runner_snapshots",
+    )
+    assert len(races) == 1
+    assert races[0]["race_id"] == "rac_1"
+    assert races[0]["venue_id"] == "Carlisle"
+    assert races[0]["place_positions"] == 3
+    assert len(races[0]["runners"]) == 3
+    by_id = {r["runner_id"]: r for r in races[0]["runners"]}
+    assert by_id["r1:h1"]["won"] is True
+    assert by_id["r1:h1"]["placed"] is True
+    assert by_id["r1:h2"]["placed"] is True
+    assert by_id["r1:h3"]["placed"] is False
+    # latest scored_at row kept for h1 (0.50 raw → normalized)
+    assert by_id["r1:h1"]["model_prob"] > by_id["r1:h2"]["model_prob"]
+
+
 def test_hook_emit(tmp_path):
     from integrations.hibs_racing.settled_race_hook import emit_race_from_scored_runners
 

@@ -18,19 +18,35 @@ RACE_ID_COLS = ("race_id", "race_key", "event_id")
 RUNNER_ID_COLS = ("runner_id", "id", "runner_key")
 VENUE_COLS = ("course_id", "venue_id", "course", "meeting_id")
 VENUE_MAPPED_COLS = ("venue_mapped", "matchbook_mapped", "course_mapped")
-POSITION_COLS = ("finish_position", "position", "pos", "plc")
-MODEL_PROB_COLS = ("place_prob", "p_place", "prob_place", "model_place_prob", "score", "prob")
-MARKET_PLACE_COLS = ("place_decimal", "place_odds", "market_place_decimal")
+POSITION_COLS = ("finish_pos", "finish_position", "position", "pos", "plc")
+MODEL_PROB_COLS = (
+    "model_place_prob",
+    "place_prob",
+    "p_place",
+    "prob_place",
+    "combo_bayes_place",
+    "model_score",
+    "score",
+    "prob",
+)
+MARKET_PLACE_COLS = (
+    "offered_place_decimal",
+    "place_decimal",
+    "place_odds",
+    "market_place_decimal",
+)
 WIN_DECIMAL_COLS = ("win_decimal", "sp_decimal", "starting_price_decimal", "odds_decimal")
 SETTLED_FLAG_COLS = ("settled", "is_settled", "result_known")
-PLACE_POSITIONS_COLS = ("place_positions", "places_paid", "each_way_places")
+PLACE_POSITIONS_COLS = ("place_positions", "places_paid", "each_way_places", "places")
+ROW_DEDUP_TS_COLS = ("scored_at", "fetched_at", "built_at", "enriched_at")
 
 PREFERRED_TABLES = (
     "settled_runners",
     "race_results",
+    "scored_runner_snapshots",
+    "ranker_features",
     "runners",
     "upcoming_runners",
-    "ranker_features",
 )
 
 
@@ -73,6 +89,30 @@ def _row_get(row: sqlite3.Row, col: Optional[str]) -> Any:
     if col is None:
         return None
     return row[col]
+
+
+def _dedupe_race_rows(
+    rows: List[sqlite3.Row],
+    *,
+    runner_col: str,
+    ts_col: Optional[str],
+) -> List[sqlite3.Row]:
+    """Keep one row per runner; latest timestamp wins when present."""
+    if not rows:
+        return rows
+    best: Dict[str, sqlite3.Row] = {}
+    for row in rows:
+        rid = str(_row_get(row, runner_col))
+        if rid not in best:
+            best[rid] = row
+            continue
+        if not ts_col:
+            continue
+        cur_ts = str(_row_get(row, ts_col) or "")
+        prev_ts = str(_row_get(best[rid], ts_col) or "")
+        if cur_ts > prev_ts:
+            best[rid] = row
+    return list(best.values())
 
 
 def _is_settled_row(row: sqlite3.Row, settled_col: Optional[str], position_col: Optional[str]) -> bool:
@@ -133,8 +173,12 @@ def extract_settled_races_from_db(
         win_col = _pick(cols, WIN_DECIMAL_COLS)
         settled_col = _pick(cols, SETTLED_FLAG_COLS)
         pp_col = _pick(cols, PLACE_POSITIONS_COLS)
+        ts_col = _pick(cols, ROW_DEDUP_TS_COLS)
 
-        rows = con.execute(f"SELECT * FROM [{src}]").fetchall()
+        sql = f"SELECT * FROM [{src}]"
+        if only_settled and pos_col:
+            sql += f" WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
+        rows = con.execute(sql).fetchall()
         by_race: Dict[str, List[sqlite3.Row]] = {}
         race_meta: Dict[str, Dict[str, Any]] = {}
 
@@ -158,6 +202,7 @@ def extract_settled_races_from_db(
 
         records: List[Dict[str, Any]] = []
         for rid, race_rows in by_race.items():
+            race_rows = _dedupe_race_rows(race_rows, runner_col=runner_col, ts_col=ts_col)
             if len(race_rows) < 2:
                 continue
             meta = race_meta.get(rid, {})
