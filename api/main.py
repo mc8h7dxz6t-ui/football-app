@@ -72,6 +72,9 @@ def health() -> Dict[str, Any]:
         "ws_max_pending_sends": int(os.environ.get("WS_MAX_PENDING_SENDS", "8")),
         "ws_delta_updates": os.environ.get("FVE_WS_DELTA_UPDATES", "1"),
         "ws_client_delta": os.environ.get("FVE_WS_CLIENT_DELTA", "0"),
+        "feed_mode": os.environ.get("FVE_FEED_MODE") or (
+            "hibs" if os.environ.get("FVE_UPSTREAM_MODE", "").strip().lower() in ("hibs", "hibs-bet", "upstream") else "direct"
+        ),
         "feed_poll_sec_matchbook": os.environ.get("FEED_POLL_SEC_MATCHBOOK", ""),
         "ws": get_ws_hub().status(),
         "api_budgets": get_budget().status(),
