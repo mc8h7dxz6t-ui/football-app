@@ -62,6 +62,27 @@ else
   warn "hibs-bet not in workspace — skip racing evidence"
 fi
 
+section "FVE scrape stack"
+if [[ -x "${ROOT}/scripts/vps_unpause_fve_scrape_stack.sh" ]]; then
+  if curl -sf "${FVE_API}/health" -o /tmp/fve_scrape_check.json 2>/dev/null; then
+    python3 - <<'PY'
+import json
+h = json.load(open("/tmp/fve_scrape_check.json"))
+fc = h.get("feed_chain") or {}
+mode = fc.get("mode") or h.get("feed_mode") or "unknown"
+paused = h.get("paused", h.get("fve_paused"))
+print(f"  feed_mode={mode} paused={paused}")
+if paused in (True, 1, "1"):
+    raise SystemExit("FVE still paused")
+PY
+    ok "FVE unpaused"
+  else
+    warn "FVE not reachable — run scripts/vps_unpause_fve_scrape_stack.sh on VPS"
+  fi
+else
+  warn "vps_unpause_fve_scrape_stack.sh missing"
+fi
+
 section "Stack boundaries"
 if [[ -x "${HIBS_ROOT}/scripts/verify_stack_boundaries.sh" ]]; then
   "${HIBS_ROOT}/scripts/verify_stack_boundaries.sh" || FAIL=1
