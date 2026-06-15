@@ -14,14 +14,17 @@ RAW="https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/${BRANCH}"
 
 log() { echo "[fve-scrape] $*"; }
 
-log "1/5 — install hibs-bet FVE lines proxy"
+log "1/6 — install hibs-bet FVE lines proxy"
 curl -fsSL "${RAW}/scripts/vps_install_hibs_fve_lines.sh" | sudo HIBS_FVE_LINES_RAW="${RAW}/patches/hibs-bet/files" bash
 
-log "2/5 — scrape lines directory"
+log "2/6 — install Inst++ CLV + market contract on hibs-bet"
+curl -fsSL "${RAW}/scripts/vps_install_hibs_inst_clv_contract.sh" | sudo HIBS_INST_RAW="${RAW}/patches/hibs-bet/files" bash || log "WARN inst CLV install skipped"
+
+log "3/6 — scrape lines directory"
 mkdir -p "${SCRAPE_DIR}"
 chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" "${SCRAPE_DIR}" 2>/dev/null || true
 
-log "3/5 — FVE .env scrape-heavy block"
+log "4/6 — FVE .env scrape-heavy block"
 mkdir -p "${FVE_ROOT}"
 ENV_FILE="${FVE_ROOT}/.env"
 touch "${ENV_FILE}"
