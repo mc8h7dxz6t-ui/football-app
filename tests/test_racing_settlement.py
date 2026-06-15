@@ -58,6 +58,19 @@ def test_settlement_coverage(db):
     assert cov["runners_with_score"] == 3
 
 
+def test_settlement_coverage_without_position_column(tmp_path):
+    path = tmp_path / "bare.sqlite"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE upcoming_runners (race_id TEXT, runner_id INTEGER, score REAL)")
+    con.execute("INSERT INTO upcoming_runners VALUES ('r1', 1, 0.4)")
+    con.commit()
+    con.close()
+    cov = settlement_coverage(path)
+    assert cov["ok"] is True
+    assert cov["runners_with_position"] == 0
+    assert cov["runners_with_score"] == 1
+
+
 def test_place_multi_placer_validation():
     rec = {
         "race_id": "r1",

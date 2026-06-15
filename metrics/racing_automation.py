@@ -274,7 +274,14 @@ def run_racing_verification_pipeline(
         except Exception as exc:
             return _finish(ok=False, status="settlement_failed", error=str(exc)[:200], hard_fail=True)
 
-    from metrics.racing_settlement import settlement_coverage
+    from metrics.racing_settlement import ensure_feature_store_schema, settlement_coverage
+
+    try:
+        report["schema_migrations"] = ensure_feature_store_schema(
+            cfg.feature_store, table=cfg.table
+        )
+    except Exception as exc:
+        return _finish(ok=False, status="schema_migration_failed", error=str(exc)[:200], hard_fail=True)
 
     report["settlement_coverage"] = settlement_coverage(cfg.feature_store, table=cfg.table)
 

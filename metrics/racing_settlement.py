@@ -33,6 +33,12 @@ class SettlementResult:
     table: str
 
 
+def _column_exists(con: sqlite3.Connection, table: str, col: Optional[str]) -> bool:
+    if not col:
+        return False
+    return col.lower() in {c.lower() for c in _columns(con, table)}
+
+
 def resolve_writer_columns(con: sqlite3.Connection, table: str) -> Dict[str, Optional[str]]:
     cols = _columns(con, table)
     return {
@@ -44,6 +50,31 @@ def resolve_writer_columns(con: sqlite3.Connection, table: str) -> Dict[str, Opt
         "venue_mapped": _pick(cols, VENUE_MAPPED_COLS),
         "place_positions": _pick(cols, PLACE_POSITIONS_COLS),
     }
+
+
+def ensure_feature_store_schema(
+    db_path: str | Path,
+    *,
+    table: Optional[str] = None,
+    use_lock: bool = True,
+) -> Dict[str, Any]:
+    """Apply versioned migrations before read-only verification (additive DDL)."""
+    path = Path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"feature_store not found: {path}")
+
+    def _run() -> Dict[str, Any]:
+        con = _connect_write(path)
+        try:
+            src = _choose_source_table(con, table=table)
+            return apply_feature_store_migrations(con, src)
+        finally:
+            con.close()
+
+    if use_lock:
+        with feature_store_lock(path):
+            return _run()
+    return _run()
 
 
 def _connect_write(db_path: Path, *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> sqlite3.Connection:
@@ -272,28 +303,30 @@ def settlement_coverage(db_path: str | Path, *, table: Optional[str] = None) -> 
     try:
         src = _choose_source_table(con, table=table)
         w = resolve_writer_columns(con, src)
+        pos_col = w["position"] if _column_exists(con, src, w["position"]) else None
+        score_col = w["score"] if _column_exists(con, src, w["score"]) else None
         total = int(con.execute(f"SELECT COUNT(*) FROM [{src}]").fetchone()[0])
         with_pos = 0
         with_score = 0
-        if w["position"]:
+        if pos_col:
             with_pos = int(
                 con.execute(
-                    f"SELECT COUNT(*) FROM [{src}] WHERE [{w['position']}] IS NOT NULL AND [{w['position']}] > 0"
+                    f"SELECT COUNT(*) FROM [{src}] WHERE [{pos_col}] IS NOT NULL AND [{pos_col}] > 0"
                 ).fetchone()[0]
             )
-        if w["score"]:
+        if score_col:
             with_score = int(
                 con.execute(
-                    f"SELECT COUNT(*) FROM [{src}] WHERE [{w['score']}] IS NOT NULL"
+                    f"SELECT COUNT(*) FROM [{src}] WHERE [{score_col}] IS NOT NULL"
                 ).fetchone()[0]
             )
         races_settled = 0
-        if w["race_id"] and w["position"]:
+        if w["race_id"] and pos_col:
             races_settled = int(
                 con.execute(
                     f"""
                     SELECT COUNT(DISTINCT [{w['race_id']}]) FROM [{src}]
-                    WHERE [{w['position']}] IS NOT NULL AND [{w['position']}] > 0
+                    WHERE [{pos_col}] IS NOT NULL AND [{pos_col}] > 0
                     """
                 ).fetchone()[0]
             )
