@@ -7,10 +7,10 @@ cd "$ROOT"
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
     cp .env.example .env
-    echo "Created .env from .env.example — set API_SPORTS_KEY then re-run."
+    echo "Created .env from .env.example — set API_SPORTS_KEY or FVE_UPSTREAM_MODE=hibs then re-run."
     exit 1
   fi
-  echo "Missing .env — copy .env.example and set API_SPORTS_KEY"
+  echo "Missing .env — copy .env.example"
   exit 1
 fi
 
@@ -28,12 +28,25 @@ fi
 
 if [[ "${FVE_PAUSED:-0}" == "1" ]] || [[ "${FVE_PAUSED:-}" =~ ^(true|yes|on)$ ]]; then
   echo "FVE is PAUSED (hibs-bet owns live APIs). See docs/PAUSED.md"
-  echo "To resume: set FVE_PAUSED=0 in .env and ensure a dedicated API key or hibs upstream."
+  echo "To resume: set FVE_PAUSED=0 — paths in docs/PAUSED.md and docs/SEPARATE_FEEDS.md"
   exit 0
 fi
 
-if [[ -z "${API_SPORTS_KEY:-}" && -z "${API_FOOTBALL_KEY:-}" ]]; then
-  echo "Set API_SPORTS_KEY in .env for auto watchlist"
+needs_api_key=1
+if [[ "${FVE_UPSTREAM_MODE:-}" =~ ^(hibs|hibs-bet|upstream)$ ]] || [[ -n "${HIBS_UPSTREAM_BASE_URL:-}" ]]; then
+  needs_api_key=0
+fi
+if [[ "${FVE_FEED_MODE:-}" == "separate" ]] && [[ -n "${WATCHLIST_FIXTURES:-}" ]]; then
+  needs_api_key=0
+fi
+if [[ "${FVE_AUTO_WATCHLIST:-1}" =~ ^(0|false|no)$ ]] && [[ -n "${WATCHLIST_FIXTURES:-}" ]]; then
+  needs_api_key=0
+fi
+
+if [[ "$needs_api_key" == "1" ]] && [[ -z "${API_SPORTS_KEY:-}" && -z "${API_FOOTBALL_KEY:-}" ]]; then
+  echo "Set API_SPORTS_KEY in .env for auto watchlist, or:"
+  echo "  FVE_UPSTREAM_MODE=hibs + HIBS_UPSTREAM_BASE_URL=..."
+  echo "  FVE_FEED_MODE=separate + WATCHLIST_FIXTURES=..."
   exit 1
 fi
 
@@ -50,6 +63,7 @@ for _ in $(seq 1 30); do
 done
 
 curl -sf "http://localhost:${FVE_API_PORT:-8000}/health" | python3 -m json.tool 2>/dev/null || true
+bash scripts/preflight_fve.sh || true
 
 echo ""
 echo "Stack up:"

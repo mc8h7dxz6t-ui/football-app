@@ -80,6 +80,18 @@ Streamlit UI (or Hibs Bet via FVE_API_URL)
 | Inst++ audit | `scripts/audit_institutional_all.sh` | FVE + football/racing evidence gates |
 | Racing health schema | `docs/RACING_HEALTH_SCHEMA.md` | hibs-racing R5–R7 `/api/health` fields |
 
+### Phase 1.6 — Separate feeds + excellence (implemented)
+
+| Item | Env / path | Status |
+|------|------------|--------|
+| Separate feed chain | `FVE_FEED_MODE=separate` | `composite` feed: matchbook → odds-backup → api-football → scrape-cache |
+| Scrape sidecar | `FVE_SCRAPE_LINES_URL` | HTTP JSON only — scrape risk outside FVE process |
+| Hibs sports via feed | `pipeline/feed_sports.py` | No API-Football burn in `FVE_UPSTREAM_MODE=hibs` |
+| Worker heartbeat | `/health` → `worker` | All ingest modes touch `FVE_WORKER_HEARTBEAT` |
+| Feed chain telemetry | `/health` → `feed_chain` | `sources_tried`, `complete_1x2`, `tick_count` |
+| Streamlit Inst++ scan | `app.py` | No per-fixture book API poll when Inst++ enabled |
+| hibs-bet lines API | `fve_lines_proxy.py` wired in web.py | `/api/fve/lines/<fixture>` |
+
 Do these **before** rewriting in Rust:
 
 1. **Delta WS payloads** — send `{type, changed_markets, ts}` not full `shopped` tree every tick.

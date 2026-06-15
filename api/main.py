@@ -42,6 +42,7 @@ class IngestRequest(BaseModel):
     home_team: str = ""
     away_team: str = ""
     event_label: str = ""
+    league_name: str = ""
 
 
 class ValueScanRequest(BaseModel):
@@ -61,6 +62,9 @@ def health() -> Dict[str, Any]:
     from pipeline.codec import codec_name
     from pipeline.redis_factory import redis_backend_label
 
+    from feeds.composite_feed import composite_feed_status
+    from pipeline.worker_status import worker_status
+
     cache = get_cache()
     risk = RiskConfig()
     return {
@@ -75,6 +79,8 @@ def health() -> Dict[str, Any]:
         "feed_mode": os.environ.get("FVE_FEED_MODE") or (
             "hibs" if os.environ.get("FVE_UPSTREAM_MODE", "").strip().lower() in ("hibs", "hibs-bet", "upstream") else "direct"
         ),
+        "feed_chain": composite_feed_status(),
+        "worker": worker_status(),
         "feed_poll_sec_matchbook": os.environ.get("FEED_POLL_SEC_MATCHBOOK", ""),
         "ws": get_ws_hub().status(),
         "api_budgets": get_budget().status(),
@@ -158,6 +164,7 @@ def ingest(req: IngestRequest) -> Dict[str, Any]:
         "home_team": req.home_team,
         "away_team": req.away_team,
         "event_label": label,
+        "league_name": req.league_name,
     }
     return ingest_fixture(build_default_registry(), req.fixture_key, context=ctx)
 

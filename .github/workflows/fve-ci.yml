@@ -27,6 +27,8 @@ jobs:
           pip install -r requirements-pro.txt -r requirements.txt
 
       - name: Pytest (unit + API/WS integration)
+        env:
+          PYTHONPATH: .
         run: pytest -q tests/
 
   api-docker-smoke:

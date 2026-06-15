@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # VPS: expose hibs-bet /api/fve/lines for FVE upstream (no duplicate book ingest).
 #
-#   curl -fsSL https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/cursor/fve-integration-tests-ci-c4a1/scripts/vps_install_hibs_fve_lines.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/main/scripts/vps_install_hibs_fve_lines.sh | sudo bash
 set -euo pipefail
 
 APP="${DEPLOY_PATH:-/opt/hibs-bet}"
-RAW="${HIBS_FVE_LINES_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/cursor/fve-integration-tests-ci-c4a1/patches/hibs-bet/files}"
+BRANCH="${HIBS_FVE_LINES_BRANCH:-main}"
+RAW="${HIBS_FVE_LINES_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/${BRANCH}/patches/hibs-bet/files}"
 
 log() { echo "[hibs-fve-lines] $*"; }
 
 [[ -d "${APP}/src/hibs_predictor" ]] || { echo "ERROR: ${APP} not found" >&2; exit 1; }
 
 dest="${APP}/src/hibs_predictor/fve_lines_proxy.py"
-mkdir -p "$(dirname "${dest}")"
+static_dest="${APP}/static/fve_ws_lines.js"
+mkdir -p "$(dirname "${dest}")" "$(dirname "${static_dest}")"
 curl -fsSL "${RAW}/src/hibs_predictor/fve_lines_proxy.py" -o "${dest}"
-log "installed fve_lines_proxy.py"
+curl -fsSL "${RAW}/static/fve_ws_lines.js" -o "${static_dest}" 2>/dev/null || true
+log "installed fve_lines_proxy.py + fve_ws_lines.js"
 
 if ! grep -q "register_fve_lines_routes" "${APP}/src/hibs_predictor/web.py" 2>/dev/null; then
   python3 <<'PY' "${APP}/src/hibs_predictor/web.py"
@@ -30,7 +33,7 @@ insert = (
     "try:\n"
     "    from hibs_predictor.fve_lines_proxy import register_fve_lines_routes\n"
     "    register_fve_lines_routes(app)\n"
-    "except Exception:\n"
+except Exception:\n"
     "    pass\n"
 )
 if "register_fve_lines_routes" not in text:

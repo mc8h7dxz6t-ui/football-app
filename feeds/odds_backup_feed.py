@@ -32,7 +32,10 @@ def _sport_keys_for_context(context: Dict[str, Any]) -> List[str]:
     extra = os.environ.get("FVE_ODDS_BACKUP_SPORT_KEYS", "").strip()
     if extra:
         keys.extend(k.strip() for k in extra.split(",") if k.strip() and k.strip() not in keys)
-    return keys
+    if keys:
+        return keys
+    # No league in context — scan all mapped sport keys (filtered by fixture teams in fetch).
+    return list(dict.fromkeys(ODDS_API_FOOTBALL_SPORTS.values()))
 
 
 class OddsBackupFeed(FeedAdapter):
