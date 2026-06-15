@@ -53,15 +53,18 @@ def _parse_fixtures(spec: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Matchbook arb scanner + executor")
-    ap.add_argument("--fixtures", required=True)
+    ap.add_argument("--fixtures", default=os.environ.get("WATCHLIST_FIXTURES", ""))
     ap.add_argument("--interval", type=float, default=2.0)
     ap.add_argument("--max-cycles", type=int, default=None)
     ap.add_argument("--execute", action="store_true", help="attempt execution (still respects dry-run gates)")
     args = ap.parse_args()
 
+    if not args.fixtures.strip():
+        sys.exit("no fixtures — pass --fixtures or set WATCHLIST_FIXTURES")
+
     keys, contexts = _parse_fixtures(args.fixtures)
     if not keys:
-        sys.exit("no fixtures")
+        sys.exit("no fixtures parsed from --fixtures / WATCHLIST_FIXTURES")
 
     risk = RiskConfig()
     registry = build_default_registry()
@@ -76,7 +79,9 @@ def main() -> None:
             ticks = cache.get_peak_ticks(fk)
             opps = scan_arbitrage(ticks, fixture_key=fk, min_profit_pct=risk.min_profit_pct)
             for opp in opps:
-                log.info("ARB %s %.2f%% %s", opp.kind, opp.profit_pct, opp.notes)
+                shadow = os.environ.get("ARB_SHADOW_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+                prefix = "SHADOW ARB" if shadow else "ARB"
+                log.info("%s %s %.2f%% %s", prefix, opp.kind, opp.profit_pct, opp.notes)
                 if args.execute or risk.auto_trade:
                     result = execute_matchbook_arb(opp, risk=risk)
                     if result.error:

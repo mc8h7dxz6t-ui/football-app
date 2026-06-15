@@ -71,6 +71,38 @@ def _fetch_fixtures(league_id: int, date: str, key: str) -> List[Dict[str, Any]]
         return []
 
 
+def _arb_only_mode() -> bool:
+    return os.environ.get("FVE_ARB_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def discover_matchbook_only() -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Build watchlist from WATCHLIST_FIXTURES and/or matchbook_map — no API-Sports."""
+    manual = os.environ.get("WATCHLIST_FIXTURES", "").strip()
+    if manual:
+        keys, contexts = parse_fixture_spec(manual)
+        log.info("matchbook-only watchlist from WATCHLIST_FIXTURES (%d fixtures)", len(keys))
+        return keys, contexts
+
+    mb_map = _load_matchbook_overrides()
+    if not mb_map:
+        log.error(
+            "FVE_ARB_ONLY: set WATCHLIST_FIXTURES or populate config/matchbook_map.json"
+        )
+        return [], {}
+
+    keys: List[str] = []
+    contexts: Dict[str, Dict[str, Any]] = {}
+    for fk, event_id in mb_map.items():
+        ctx: Dict[str, Any] = {"event_label": fk, "matchbook_event_id": int(event_id)}
+        if " v " in fk:
+            h, a = fk.split(" v ", 1)
+            ctx["home_team"], ctx["away_team"] = h.strip(), a.strip()
+        keys.append(fk)
+        contexts[fk] = ctx
+    log.info("matchbook-only watchlist from map (%d fixtures)", len(keys))
+    return keys, contexts
+
+
 def discover_upcoming(
     *,
     days_ahead: Optional[int] = None,
@@ -183,12 +215,15 @@ class WatchlistState:
         return list(self._keys), dict(self._contexts)
 
     def refresh(self) -> int:
-        keys, contexts = discover_upcoming()
-        if not keys:
-            manual = os.environ.get("WATCHLIST_FIXTURES", "").strip()
-            if manual:
-                keys, contexts = parse_fixture_spec(manual)
-                log.info("watchlist using manual WATCHLIST_FIXTURES (%d fixtures)", len(keys))
+        if _arb_only_mode():
+            keys, contexts = discover_matchbook_only()
+        else:
+            keys, contexts = discover_upcoming()
+            if not keys:
+                manual = os.environ.get("WATCHLIST_FIXTURES", "").strip()
+                if manual:
+                    keys, contexts = parse_fixture_spec(manual)
+                    log.info("watchlist using manual WATCHLIST_FIXTURES (%d fixtures)", len(keys))
         self._keys = keys
         self._contexts = contexts
         self._updated_at = time.time()
