@@ -26,7 +26,8 @@ for rel in \
   src/hibs_predictor/forward_evidence.py \
   src/hibs_predictor/prediction_log.py \
   src/hibs_predictor/price_truth.py \
-  src/hibs_predictor/institutional_readiness.py; do
+  src/hibs_predictor/institutional_readiness.py \
+  src/hibs_predictor/production_secure.py; do
   install_file "${rel}"
 done
 

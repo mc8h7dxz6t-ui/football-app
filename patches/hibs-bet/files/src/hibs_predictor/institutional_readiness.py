@@ -102,6 +102,9 @@ def collect_config_issues(*, production: bool | None = None) -> Tuple[List[str],
     if is_prod and not _env_truthy("HIBS_SHARPEN_GATES"):
         warnings.append("HIBS_SHARPEN_GATES=0 — trial sharpen profile not active.")
 
+    if is_prod and _env_truthy("HIBS_FVE_INTEGRATION") and _env_truthy("FVE_PAUSED"):
+        issues.append("FVE_PAUSED=1 with HIBS_FVE_INTEGRATION=1 — line shop offline on production.")
+
     try:
         from hibs_predictor.market_contract import validate_market_contracts
 
@@ -170,6 +173,15 @@ def readiness_dict() -> Dict[str, Any]:
         market_contract["valid"] = not _mc_issues
     except Exception as exc:
         market_contract = {"error": str(exc)[:160]}
+
+    production_secure: Dict[str, Any] = {}
+    try:
+        from hibs_predictor.production_secure import production_secure_dict
+
+        production_secure = production_secure_dict(probe_fve=_env_truthy("HIBS_FVE_INTEGRATION"))
+    except Exception as exc:
+        production_secure = {"error": str(exc)[:160]}
+
     try:
         from hibs_predictor.forward_evidence import forward_evidence_gates
 
@@ -235,6 +247,7 @@ def readiness_dict() -> Dict[str, Any]:
         "tournament_focus": tfc,
         "pipeline_excluded_leagues": excluded,
         "market_contract": market_contract,
+        "production_secure": production_secure,
         "evidence_gates": evidence,
         "trial_value_leagues": sorted(_TRIAL_VALUE_LEAGUES),
     }
