@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from feeds.registry import FeedRegistry, build_default_registry
+from feeds.scrape_mode import scrape_mode_enabled
 
 
 def normalize_feed_sports(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -36,6 +37,8 @@ def normalize_feed_sports(raw: Dict[str, Any]) -> Dict[str, Any]:
 def sports_from_registry(
     fixture_key: str,
     registry: Optional[FeedRegistry] = None,
+    *,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     reg = registry or build_default_registry()
     for feed in reg.enabled():
@@ -44,5 +47,11 @@ def sports_from_registry(
             continue
         raw = fetch(fixture_key)
         if isinstance(raw, dict) and raw.get("home_stats") and raw.get("away_stats"):
+            return normalize_feed_sports(raw)
+    if scrape_mode_enabled() and context:
+        from scrapers.fotmob_client import sports_for_fixture
+
+        raw = sports_for_fixture(fixture_key, context)
+        if raw:
             return normalize_feed_sports(raw)
     return None

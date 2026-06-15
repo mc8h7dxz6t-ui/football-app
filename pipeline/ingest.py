@@ -11,6 +11,7 @@ from engine.devig import devig_1x2
 from feeds.base import FeedAdapter
 from feeds.hibs_upstream_feed import HibsUpstreamFeed
 from feeds.registry import FeedRegistry, build_default_registry
+from feeds.scrape_mode import scrape_watchlist_enabled
 from pipeline.feed_sports import sports_from_registry
 from pipeline.worker_status import touch_worker_heartbeat
 from odds_shopping import shop_lines
@@ -180,15 +181,15 @@ def refresh_sports_context(
         return {"fixture_key": fixture_key, "cached": True, "sports": cached}
 
     reg = registry or build_default_registry()
-    feed_sports = sports_from_registry(fixture_key, reg)
+    feed_sports = sports_from_registry(fixture_key, reg, context=context)
     if feed_sports:
         cache.put_sports(fixture_key, feed_sports)
         bundle = build_fixture_bundle(cache, fixture_key)
         get_line_bus().publish(fixture_key, {"type": "sports_update", **bundle})
         return {"fixture_key": fixture_key, "cached": False, "sports": feed_sports, "source": "feed"}
 
-    if HibsUpstreamFeed.upstream_mode_enabled():
-        log.warning("hibs upstream sports missing for %s — not calling API-Football", fixture_key)
+    if HibsUpstreamFeed.upstream_mode_enabled() or scrape_mode_enabled():
+        log.warning("sports missing for %s — not calling API-Football", fixture_key)
         if cached:
             return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached}
         return {"fixture_key": fixture_key, "error": "hibs upstream sports unavailable"}

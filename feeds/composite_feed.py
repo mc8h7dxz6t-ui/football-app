@@ -20,6 +20,9 @@ _BUDGET_SOURCE = {
     "odds-backup": "odds_api",
     "the-odds-api": "odds_api",
     "api-football": "api_football",
+    "hibs-upstream": "hibs_upstream",
+    "scrape-file": "scrape",
+    "scrape-cache": "scrape",
 }
 
 _LAST_STATUS: Dict[str, Any] = {
@@ -37,12 +40,18 @@ def composite_feed_status() -> Dict[str, Any]:
     return dict(_LAST_STATUS)
 
 
+from feeds.scrape_mode import scrape_mode_enabled
+
+
 def _parse_chain() -> List[str]:
     raw = (os.environ.get("FVE_FEED_CHAIN") or "").strip()
     if raw:
         return [s.strip() for s in raw.split(",") if s.strip()]
+    if scrape_mode_enabled():
+        return ["hibs-upstream", "scrape-file", "scrape-cache"]
     default = ["matchbook", "odds-backup", "api-football"]
-    if os.environ.get("FVE_SCRAPE_LINES_URL", "").strip():
+    if os.environ.get("FVE_SCRAPE_LINES_URL", "").strip() or os.environ.get("FVE_SCRAPE_LINES_DIR", "").strip():
+        default.append("scrape-file")
         default.append("scrape-cache")
     return default
 
@@ -77,14 +86,15 @@ class CompositeFeed(FeedAdapter):
                 log.debug("composite skip %s circuit open", name)
                 continue
             budget_key = _BUDGET_SOURCE.get(name, name)
-            if not get_budget().allow(budget_key):
+            if budget_key not in ("scrape", "hibs_upstream") and not get_budget().allow(budget_key):
                 log.debug("composite skip %s budget exhausted", name)
                 continue
             tried.append(name)
             br.call_started()
             try:
                 batch = child.fetch_ticks(fixture_key, context)
-                get_budget().record(budget_key)
+                if budget_key not in ("scrape", "hibs_upstream"):
+                    get_budget().record(budget_key)
                 br.record_success()
             except Exception as exc:
                 br.record_failure(str(exc))

@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import feeds.registry as registry_mod
 from feeds.composite_feed import CompositeFeed
 from feeds.feed_utils import has_complete_1x2, merge_ticks_union
-from feeds.scrape_cache_feed import ScrapeCacheFeed, _payload_to_ticks
+from feeds.scrape_parse import payload_to_ticks
 from pipeline.tick import PriceTick
 
 
@@ -29,7 +29,7 @@ def test_has_complete_1x2():
 
 
 def test_scrape_payload_to_ticks_best_odds_shape():
-    ticks = _payload_to_ticks(
+    ticks = payload_to_ticks(
         "Arsenal v Chelsea",
         {
             "best_odds_1x2": {"home": 2.1, "draw": 3.4, "away": 3.2},
@@ -38,7 +38,7 @@ def test_scrape_payload_to_ticks_best_odds_shape():
         },
     )
     assert len(ticks) == 3
-    assert ticks[0].source == "scrape-cache"
+    assert ticks[0].source == "scrape"
 
 
 class _StubFeed:
