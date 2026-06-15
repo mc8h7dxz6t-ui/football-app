@@ -32,6 +32,19 @@ API-Football, Odds API, or Matchbook quota.
    HIBS_UPSTREAM_TOKEN=   # optional — same as hibs FVE_LINES_TOKEN
    ```
 
+3. **Separate stack** — own keys + backup chain + optional scrape sidecar (`docs/SEPARATE_FEEDS.md`):
+   ```bash
+   FVE_PAUSED=0
+   FVE_FEED_MODE=separate
+   ```
+4. **Scrape-heavy (zero paid APIs on FVE)** — FotMob watchlist + file cache + optional hibs collector (`docs/SCRAPE_HEAVY.md`):
+   ```bash
+   FVE_PAUSED=0
+   FVE_FEED_MODE=scrape
+   FVE_SCRAPE_LINES_DIR=./data/scrape-lines
+   bash scripts/run_scrape_stack.sh
+   ```
+
 Unset pause (dedicated-key path only):
 
 ```bash

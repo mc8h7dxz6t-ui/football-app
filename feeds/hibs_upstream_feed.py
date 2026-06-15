@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
+import time
+
 from bookmakers import classify_bookmaker
 from feeds.base import FeedAdapter
 from pipeline.tick import PriceTick
@@ -79,5 +81,11 @@ class HibsUpstreamFeed(FeedAdapter):
             "home_stats": home,
             "away_stats": away,
             "kickoff_iso": payload.get("kickoff_iso"),
+            "league": payload.get("league"),
             "source": "hibs-upstream",
+            "data_quality": {
+                "home_ok": bool(home.get("played")),
+                "away_ok": bool(away.get("played")),
+            },
+            "updated_at": time.time(),
         }

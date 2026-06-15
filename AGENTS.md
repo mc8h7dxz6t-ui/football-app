@@ -63,7 +63,8 @@ Streamlit should use `FVE_API_URL=http://localhost:8000` when the ingest layer i
 
 | Item | Detail |
 |------|--------|
-| WS endpoint | `ws://localhost:8000/ws/lines/{fixture_key}` — snapshot on connect, `update` on tick change |
+| WS endpoint | `ws://localhost:8000/ws/lines/{fixture_key}` — snapshot on connect, `line_update` on tick change |
+| Delta merge | `FVE_WS_CLIENT_DELTA=0` (default) hub sends full `lines`; set `1` for raw `changed_markets` |
 | Cross-process | Worker + API must share `REDIS_URL` (line_bus pub/sub) |
 | Odds API feed | `ENABLE_ODDS_API_FEED=1` only when quota allows; default poll 300s |
 | Shared quotas | `FVE_MATCHBOOK_MAX_CALLS_PER_HOUR`, `FVE_ODDS_API_MAX_CALLS_PER_HOUR` (default **15**), `FVE_API_FOOTBALL_MAX_CALLS_PER_HOUR` |
