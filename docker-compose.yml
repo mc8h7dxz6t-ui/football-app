@@ -112,5 +112,63 @@ services:
       api:
         condition: service_healthy
 
+  worker-arb:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    profiles: ["arb-shadow"]
+    command: ["python", "worker.py", "--auto"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      FVE_PAUSED: "1"
+      FVE_ARB_ONLY: "1"
+      FVE_AUTO_WATCHLIST: "1"
+      DISABLED_FEEDS: api-football,betfair,pinnacle,the-odds-api
+      ENABLE_ODDS_API_FEED: "0"
+      MATCHBOOK_KILL_SWITCH: "1"
+      FVE_WORKER_HEARTBEAT: /tmp/fve_worker_heartbeat
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /tmp/fve_worker_heartbeat && test $(($(date +%s) - $(cat /tmp/fve_worker_heartbeat))) -lt 180",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  arb-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    profiles: ["arb-shadow"]
+    command: ["python", "arb_worker.py"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      FVE_PAUSED: "1"
+      FVE_ARB_ONLY: "1"
+      DISABLED_FEEDS: api-football,betfair,pinnacle,the-odds-api
+      ENABLE_ODDS_API_FEED: "0"
+      MATCHBOOK_KILL_SWITCH: "1"
+      MATCHBOOK_AUTO_TRADE: "0"
+      ARB_SHADOW_LOG: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker-arb:
+        condition: service_healthy
+
 volumes:
   fve_pg:

@@ -42,3 +42,13 @@ def build_default_registry() -> FeedRegistry:
     if os.environ.get("ENABLE_ODDS_API_FEED", "").strip().lower() in ("1", "true", "yes", "on"):
         feeds.append(OddsApiFeed())
     return FeedRegistry(feeds)
+
+
+def enabled_feed_names(registry: Optional[FeedRegistry] = None) -> List[str]:
+    reg = registry if registry is not None else build_default_registry()
+    return [f.name for f in reg.enabled()]
+
+
+def is_matchbook_only(registry: Optional[FeedRegistry] = None) -> bool:
+    """True when the only enabled ingest feed is Matchbook (arb-only / frozen mode)."""
+    return set(enabled_feed_names(registry)) == {"matchbook"}

@@ -47,6 +47,7 @@ Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge 
 | Pro deps | `pip install -r requirements-pro.txt` |
 | API | `uvicorn api.main:app --port 8000` |
 | Hands-off stack | `cp .env.example .env` → `bash scripts/run_stack.sh` (Redis + API + auto worker + UI) |
+| Arb shadow (frozen) | `docker compose --profile arb-shadow up -d` — see `docs/ARB_FREEZE.md` |
 | Ingest worker | `python worker.py --auto` (discover fixtures) or `--fixtures 'key:id:matchbook_id'` |
 | Preflight | `bash scripts/preflight_fve.sh` — budgets + optional line cache check |
 | Exchange poll override | `FEED_POLL_SEC_MATCHBOOK=0.5` |

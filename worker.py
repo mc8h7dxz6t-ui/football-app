@@ -19,6 +19,7 @@ Env:
   FEED_POLL_SEC_MATCHBOOK=0.5   # faster exchange poll
   PEAK_ODDS_WINDOW_SEC=5
   TICK_HISTORY_MAX=2000
+  FVE_ARB_ONLY=1                # Matchbook-only ingest while FVE_PAUSED=1 (see docs/ARB_FREEZE.md)
 """
 
 from __future__ import annotations
@@ -28,23 +29,57 @@ import logging
 import os
 import sys
 
+from feeds.registry import build_default_registry, is_matchbook_only
 from pipeline.ingest import run_ingest_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("worker")
 
 
-def _paused() -> bool:
-    v = os.environ.get("FVE_PAUSED", "").strip().lower()
+def _env_truthy(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 
-def main() -> None:
-    if _paused():
+def _paused() -> bool:
+    return _env_truthy("FVE_PAUSED")
+
+
+def _arb_only() -> bool:
+    return _env_truthy("FVE_ARB_ONLY")
+
+
+def _enforce_pause_and_arb_gates() -> None:
+    registry = build_default_registry()
+    enabled = ", ".join(f.name for f in registry.enabled()) or "(none)"
+
+    if _arb_only() and not is_matchbook_only(registry):
         print(
-            "FVE worker paused (FVE_PAUSED=1). hibs-bet owns live APIs — see docs/PAUSED.md",
+            "FVE_ARB_ONLY=1 requires Matchbook-only feeds "
+            "(e.g. DISABLED_FEEDS=api-football,betfair,pinnacle,the-odds-api). "
+            f"Enabled: {enabled}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _paused():
+        if _arb_only() and is_matchbook_only(registry):
+            log.info(
+                "FVE_ARB_ONLY: Matchbook-only ingest while FVE_PAUSED=1 (enabled=%s)",
+                enabled,
+            )
+            return
+        print(
+            "FVE worker paused (FVE_PAUSED=1). hibs-bet owns live APIs — "
+            "see docs/PAUSED.md and docs/ARB_FREEZE.md for arb-only mode",
             file=sys.stderr,
         )
         sys.exit(0)
+
+
+def main() -> None:
+    _enforce_pause_and_arb_gates()
+
     ap = argparse.ArgumentParser(description="FVE tiered ingest worker")
     ap.add_argument(
         "--auto",

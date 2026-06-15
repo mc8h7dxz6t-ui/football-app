@@ -15,6 +15,7 @@ API-Football, Odds API, or Matchbook quota.
 
 - `pytest -q`
 - `python3 run_backtest.py --simulate 6000`
+- Matchbook-only arb shadow: `docs/ARB_FREEZE.md` + `docker compose --profile arb-shadow up`
 
 ## Resume later (pick one)
 
