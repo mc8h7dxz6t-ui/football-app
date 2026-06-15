@@ -88,7 +88,7 @@ def _apply_race_on_connection(
     missing = 0
     for r in runners:
         rid = r.get("runner_id") or r.get("id")
-        pos = r.get("finish_position", r.get("position", r.get("pos")))
+        pos = r.get("finish_position", r.get("finish_pos", r.get("position", r.get("pos"))))
         if rid is None or pos is None:
             missing += 1
             continue

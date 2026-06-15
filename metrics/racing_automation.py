@@ -13,7 +13,13 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from metrics.racing import evaluate_racing_window, racing_record_from_dict
 from metrics.racing_jsonl_store import append_records, load_jsonl, load_race_ids, trim_jsonl
-from metrics.racing_sqlite import extract_settled_races_from_db
+from metrics.racing_sqlite import (
+    MODEL_PROB_COLS,
+    POSITION_COLS,
+    _columns,
+    _pick,
+    extract_settled_races_from_db,
+)
 
 
 @dataclass
@@ -132,31 +138,44 @@ def preflight_feature_store(cfg: RacingAutomationConfig) -> Dict[str, Any]:
             out["tables"] = tables
             out["size_mb"] = round(cfg.feature_store.stat().st_size / 1_048_576, 2)
             out["ok"] = True
-            # quick settled hint on upcoming_runners
-            if "upcoming_runners" in tables:
-                cols = {r[1] for r in con.execute("PRAGMA table_info(upcoming_runners)")}
-                pos_col = next((c for c in ("finish_position", "position", "pos") if c in cols), None)
-                score_col = next((c for c in ("score", "place_prob", "p_place") if c in cols), None)
-                total = int(con.execute("SELECT COUNT(*) FROM upcoming_runners").fetchone()[0])
-                settled = 0
-                scored = 0
+
+            def _table_coverage(table: str) -> Dict[str, Any]:
+                cols = _columns(con, table)
+                pos_col = _pick(cols, POSITION_COLS)
+                score_col = _pick(cols, MODEL_PROB_COLS)
+                total = int(con.execute(f"SELECT COUNT(*) FROM [{table}]").fetchone()[0])
+                with_pos = 0
+                with_score = 0
                 if pos_col:
-                    settled = int(
+                    with_pos = int(
                         con.execute(
-                            f"SELECT COUNT(*) FROM upcoming_runners WHERE [{pos_col}] IS NOT NULL AND [{pos_col}] > 0"
+                            f"SELECT COUNT(*) FROM [{table}] "
+                            f"WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
                         ).fetchone()[0]
                     )
                 if score_col:
-                    scored = int(
+                    with_score = int(
                         con.execute(
-                            f"SELECT COUNT(*) FROM upcoming_runners WHERE [{score_col}] IS NOT NULL"
+                            f"SELECT COUNT(*) FROM [{table}] WHERE [{score_col}] IS NOT NULL"
                         ).fetchone()[0]
                     )
-                out["upcoming_runners"] = {
+                return {
                     "total": total,
-                    "with_position": settled,
-                    "with_score": scored,
+                    "position_column": pos_col,
+                    "score_column": score_col,
+                    "with_position": with_pos,
+                    "with_score": with_score,
                 }
+
+            verify_table = cfg.table
+            if verify_table and verify_table in tables:
+                out["verification_table"] = {verify_table: _table_coverage(verify_table)}
+            elif "scored_runner_snapshots" in tables:
+                out["verification_table"] = {
+                    "scored_runner_snapshots": _table_coverage("scored_runner_snapshots")
+                }
+            if "upcoming_runners" in tables:
+                out["upcoming_runners"] = _table_coverage("upcoming_runners")
         finally:
             con.close()
     except Exception as exc:
