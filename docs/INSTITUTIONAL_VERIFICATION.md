@@ -78,6 +78,36 @@ sudo bash scripts/racing_verification_automation.sh --install-cron
 
 Pipeline: **flock** → emit new races → trim window (2500 max) → verify → `data_room_racing.json` + `automation_state.json`. Thin window (&lt;1000 races) exits **0** (`accumulating`); hard fail only if DB missing.
 
+### Cron, sudo, and environment paths
+
+The pipeline **does not need root** to read SQLite or rewrite JSONL under `/opt/hibs-racing/data/`. Root/`sudo` appears only for **`--install-cron`**, which writes the **www-data** crontab (same pattern as hibs-bet `cron-hibs-racing-daily.sh`).
+
+Paths and secrets live in one file — copy `deploy/racing-verification.cron.env.example` to `/opt/hibs-racing/config/verification.cron.env`. The shell wrapper sources it before `--run`; the installed cron line is `bash -lc 'set -a; [ -f …/verification.cron.env ] && . …; set +a; …/racing_verification_automation.sh --run'`, so the crontab itself has **no inline env vars** and no permission fight over `/var/log`.
+
+Default log path is `${HIBS_RACING_DEPLOY_PATH}/logs/verification-automation.log` (www-data writable). Use `/var/log/hibs-racing/` only if that directory is pre-chowned to www-data.
+
+`FVE_METRICS_ROOT` points at the **football-app** checkout that hosts `metrics/` and the venv — not a root requirement.
+
+### flock skip vs successful run (`automation_state.json`)
+
+Concurrent runs use non-blocking flock. A skip exits **0** (benign for cron) but must **not** be treated as a fresh verification.
+
+| Field | Successful run | flock skip |
+|-------|----------------|------------|
+| `run_outcome` | `completed` | `skipped_concurrent` |
+| `skipped` | `false` | `true` |
+| `locked` | `false` | `true` |
+| `last_full_run_at` | updated to this run | **unchanged** (prior full run) |
+| `window` / `emit` / `gates` | refreshed | **carried forward** from last full run |
+
+Alerting: treat `run_outcome == "completed"` (and optionally `last_full_run_at` within SLA) as a true metrics refresh; ignore exit code alone when `skipped` is true.
+
+### Trim window (2500 races) and Murphy resolution
+
+Trim is a **race-count cap**, not a fixed calendar window: keep the last 2,500 settled races by JSONL append order. Calendar span depends on ingest rate (UK/Irish cards ≈ 30–50 settled races/day once the pipeline is warm → **~50–80 calendar days** at cap). If JSONL rows include `race_date` / `settled_at`, `automation_state.json` → `window` reports `oldest_race_date`, `newest_race_date`, and `calendar_days_span`.
+
+Institutional gate requires **≥1,000 races** (macro Brier). Murphy pools **runner legs** across those races (~8 runners/race → **~20k legs** at cap vs **~8k** at the gate floor). Resolution uses 10 probability bins; with place target base rate ~0.25–0.35, 8k+ legs yields stable bin counts for institutional comparison — the 2,500-race cap is headroom above the gate, not the minimum for Murphy.
+
 See `deploy/cron-racing-verification.snippet.sh` for hibs-bet `cron-hibs-racing-daily.sh` hook.
 
 Macro Brier per race:

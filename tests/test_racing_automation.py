@@ -63,6 +63,7 @@ def test_pipeline_accumulating(feature_store, tmp_path):
     )
     report = run_racing_verification_pipeline(cfg, use_lock=False)
     assert report["ok"] is True
+    assert report["run_outcome"] == "completed"
     assert report["status"] == "accumulating"
     assert report["window"]["n_races"] == 1
     assert (tmp_path / "data_room.json").is_file()
@@ -88,6 +89,62 @@ def test_exit_code_hard_fail():
     assert exit_code_for_report({"hard_fail": True}) == 1
     assert exit_code_for_report({"ok": True, "status": "accumulating"}) == 0
     assert exit_code_for_report({"skipped": True, "ok": True}) == 0
+
+
+def test_skip_preserves_last_full_run(feature_store, tmp_path):
+    cfg = RacingAutomationConfig(
+        feature_store=feature_store,
+        jsonl_path=tmp_path / "settled.jsonl",
+        data_room_path=tmp_path / "data_room.json",
+        state_path=tmp_path / "state.json",
+        lock_path=tmp_path / ".lock",
+        min_races_for_verify=1000,
+    )
+    first = run_racing_verification_pipeline(cfg, use_lock=False)
+    assert first["run_outcome"] == "completed"
+    assert first["last_full_run_at"]
+    n_before = first["window"]["n_races"]
+
+    import fcntl
+    from contextlib import contextmanager
+
+    @contextmanager
+    def hold_lock():
+        fh = cfg.lock_path.open("a+")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+    with hold_lock():
+        skipped = run_racing_verification_pipeline(cfg, use_lock=True, wait_lock=False)
+    assert skipped["run_outcome"] == "skipped_concurrent"
+    assert skipped["skipped"] is True
+    assert skipped["locked"] is True
+    assert skipped["last_full_run_at"] == first["last_full_run_at"]
+    assert skipped["window"]["n_races"] == n_before
+
+
+def test_trim_calendar_span(tmp_path):
+    from metrics.racing_jsonl_store import window_span_from_records
+
+    jl = tmp_path / "dated.jsonl"
+    append_records(
+        jl,
+        [
+            {"race_id": "a", "race_date": "2026-01-01", "target": "place", "runners": []},
+            {"race_id": "b", "race_date": "2026-03-15", "target": "place", "runners": []},
+        ],
+    )
+    trim = trim_jsonl(jl, max_races=10)
+    assert trim["calendar_span_known"] is True
+    assert trim["oldest_race_date"] == "2026-01-01"
+    assert trim["newest_race_date"] == "2026-03-15"
+    assert trim["calendar_days_span"] == 74
+    span = window_span_from_records([])
+    assert span["calendar_span_known"] is False
 
 
 def test_resolve_config_env(monkeypatch, tmp_path):

@@ -36,6 +36,24 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _load_state_snapshot(state_path: Path) -> Dict[str, Any]:
+    if not state_path.is_file():
+        return {}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _run_outcome_for_status(status: str, *, skipped: bool = False) -> str:
+    if skipped or status == "skipped_concurrent":
+        return "skipped_concurrent"
+    if status in ("error", "preflight_failed", "settlement_failed"):
+        return "failed"
+    return "completed"
+
+
 def resolve_automation_config(
     *,
     feature_store: str = "",
@@ -194,9 +212,32 @@ def run_racing_verification_pipeline(
     }
 
     def _finish(**extra: Any) -> Dict[str, Any]:
+        prev = _load_state_snapshot(cfg.state_path)
         report.update(extra)
         report["duration_sec"] = round(time.time() - started, 2)
         report["finished_at"] = _utc_iso()
+        status = str(report.get("status", ""))
+        skipped = bool(report.get("skipped"))
+        report["run_outcome"] = _run_outcome_for_status(status, skipped=skipped)
+        if report["run_outcome"] == "completed":
+            report["last_full_run_at"] = report["finished_at"]
+        elif prev.get("last_full_run_at"):
+            report["last_full_run_at"] = prev["last_full_run_at"]
+        if report["run_outcome"] == "skipped_concurrent":
+            report["locked"] = True
+            for key in (
+                "window",
+                "emit",
+                "gates",
+                "institutional_grade",
+                "thin_window",
+                "data_room",
+                "settlement_coverage",
+            ):
+                if key not in report and key in prev:
+                    report[key] = prev[key]
+        else:
+            report["locked"] = False
         try:
             cfg.state_path.parent.mkdir(parents=True, exist_ok=True)
             cfg.state_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -285,7 +326,18 @@ def run_racing_verification_pipeline(
                 **append_stats,
                 **trim_stats,
             },
-            "window": {"n_races": n_races, "parse_errors": parse_errors, "parse_error_samples": parse_error_samples},
+            "window": {
+                "n_races": n_races,
+                "parse_errors": parse_errors,
+                "parse_error_samples": parse_error_samples,
+                "max_races_cap": cfg.max_races_in_file,
+                **{k: trim_stats.get(k) for k in (
+                    "calendar_span_known",
+                    "oldest_race_date",
+                    "newest_race_date",
+                    "calendar_days_span",
+                )},
+            },
             "gates": gates,
             "data_room": str(cfg.data_room_path),
             "institutional_grade": institutional,

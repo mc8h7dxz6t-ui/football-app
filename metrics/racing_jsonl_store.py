@@ -57,14 +57,60 @@ def append_records(
 def trim_jsonl(path: Path, *, max_races: int) -> Dict[str, int]:
     """Keep the most recent ``max_races`` lines (by file order)."""
     if max_races <= 0 or not path.is_file():
-        return {"before": 0, "after": 0, "trimmed": 0}
+        return {"before": 0, "after": 0, "trimmed": 0, "max_races": max_races}
     records = [r for r in load_jsonl(path) if r.get("race_id") and "_corrupt_line" not in r]
     before = len(records)
     if before <= max_races:
-        return {"before": before, "after": before, "trimmed": 0}
+        span = window_span_from_records(records)
+        return {"before": before, "after": before, "trimmed": 0, "max_races": max_races, **span}
     kept = records[-max_races:]
+    span = window_span_from_records(kept)
     atomic_write_jsonl(path, kept)
-    return {"before": before, "after": len(kept), "trimmed": before - len(kept)}
+    return {
+        "before": before,
+        "after": len(kept),
+        "trimmed": before - len(kept),
+        "max_races": max_races,
+        **span,
+    }
+
+
+_DATE_KEYS = ("race_date", "meeting_date", "settled_at", "off_time", "race_time")
+
+
+def window_span_from_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Calendar span for trim window (when JSONL rows carry date fields)."""
+    dates: List[str] = []
+    for rec in records:
+        for key in _DATE_KEYS:
+            val = rec.get(key)
+            if val:
+                dates.append(str(val)[:10])
+                break
+    if not dates:
+        return {
+            "calendar_span_known": False,
+            "oldest_race_date": None,
+            "newest_race_date": None,
+            "calendar_days_span": None,
+        }
+    dates_sorted = sorted(dates)
+    oldest, newest = dates_sorted[0], dates_sorted[-1]
+    days: int | None = None
+    try:
+        from datetime import date
+
+        d0 = date.fromisoformat(oldest)
+        d1 = date.fromisoformat(newest)
+        days = (d1 - d0).days + 1
+    except ValueError:
+        pass
+    return {
+        "calendar_span_known": True,
+        "oldest_race_date": oldest,
+        "newest_race_date": newest,
+        "calendar_days_span": days,
+    }
 
 
 def atomic_write_jsonl(path: Path, records: List[Dict[str, Any]]) -> None:

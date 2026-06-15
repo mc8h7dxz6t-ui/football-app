@@ -31,27 +31,55 @@ from metrics.racing_automation import (
 MARKER = "# hibs-racing-verification-automation"
 
 
-def install_cron(*, metrics_root: Path, log_file: Path) -> None:
-    """Install 3× daily cron (after racing card refresh at :05)."""
+MARKER = "# hibs-racing-verification-automation"
+CRON_USER = os.environ.get("RACING_CRON_USER", "www-data")
+
+
+def install_cron(*, metrics_root: Path, log_file: Path, cron_user: str = CRON_USER) -> None:
+    """Install 3× daily cron for www-data (matches hibs-bet racing daily pattern)."""
     import subprocess
 
     script = metrics_root / "scripts" / "racing_verification_automation.sh"
     if not script.is_file():
-        script = metrics_root / "scripts" / "racing_verification_automation.py"
+        raise SystemExit(f"missing {script}")
+    env_file = os.environ.get(
+        "RACING_VERIFICATION_ENV_FILE",
+        str(Path(os.environ.get("HIBS_RACING_DEPLOY_PATH", "/opt/hibs-racing")) / "config" / "verification.cron.env"),
+    )
+    # Cron: source env file then run — no inline secrets; paths live in one file.
+    cron_cmd = (
+        f"bash -lc 'set -a; [ -f {env_file} ] && . {env_file}; set +a; "
+        f"{script} --run' >> {log_file} 2>&1"
+    )
     lines = [
-        f"20 6 * * * {script} --run >> {log_file} 2>&1 {MARKER}",
-        f"20 12 * * * {script} --run >> {log_file} 2>&1 {MARKER}",
-        f"20 17 * * * {script} --run >> {log_file} 2>&1 {MARKER}",
+        f"20 6 * * * {cron_cmd} {MARKER}",
+        f"20 12 * * * {cron_cmd} {MARKER}",
+        f"20 17 * * * {cron_cmd} {MARKER}",
     ]
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    try:
+        log_file.touch(exist_ok=True)
+    except OSError:
+        pass
+
+    list_cmd = ["crontab", "-u", cron_user, "-l"]
+    existing = subprocess.run(list_cmd, capture_output=True, text=True)
     body = existing.stdout if existing.returncode == 0 else ""
-    filtered = "\n".join(ln for ln in body.splitlines() if MARKER not in ln and "racing_verification_automation" not in ln)
+    filtered = "\n".join(
+        ln for ln in body.splitlines()
+        if MARKER not in ln and "racing_verification_automation" not in ln
+    )
     new_crontab = filtered.rstrip() + "\n\n" + "\n".join(lines) + "\n"
-    proc = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
+    proc = subprocess.run(
+        ["crontab", "-u", cron_user, "-"],
+        input=new_crontab,
+        text=True,
+        capture_output=True,
+    )
     if proc.returncode != 0:
-        raise SystemExit(proc.stderr or "crontab install failed")
-    print(f"Installed racing verification cron → {log_file}")
+        raise SystemExit(proc.stderr or f"crontab install failed for user {cron_user}")
+    print(f"Installed racing verification cron for {cron_user} → {log_file}")
+    print(f"Env file (create if missing): {env_file}")
 
 
 def main() -> None:
@@ -62,6 +90,7 @@ def main() -> None:
     ap.add_argument("--jsonl", default="")
     ap.add_argument("--racing-root", default="")
     ap.add_argument("--no-lock", action="store_true")
+    ap.add_argument("--wait-lock", action="store_true", help="block until flock available")
     ap.add_argument("--settle-from", default="", help="JSON file of race results to write before emit")
     ap.add_argument("--json", action="store_true", help="print full report JSON to stdout")
     args = ap.parse_args()
@@ -69,8 +98,12 @@ def main() -> None:
     metrics_root = Path(os.environ.get("FVE_METRICS_ROOT", ROOT))
 
     if args.install_cron:
+        deploy = Path(os.environ.get("HIBS_RACING_DEPLOY_PATH", "/opt/hibs-racing"))
         log = Path(
-            os.environ.get("RACING_VERIFICATION_LOG", "/var/log/hibs-racing/verification-automation.log")
+            os.environ.get(
+                "RACING_VERIFICATION_LOG",
+                str(deploy / "logs" / "verification-automation.log"),
+            )
         )
         install_cron(metrics_root=metrics_root, log_file=log)
         return
@@ -95,12 +128,15 @@ def main() -> None:
         print(
             json.dumps(
                 {
+                    "run_outcome": report.get("run_outcome"),
                     "status": report.get("status"),
                     "ok": report.get("ok"),
+                    "skipped": report.get("skipped", False),
                     "n_races": (report.get("window") or {}).get("n_races"),
                     "institutional_grade": report.get("institutional_grade"),
                     "emit": report.get("emit"),
                     "data_room": report.get("data_room"),
+                    "state_file": str(cfg.state_path),
                 },
                 indent=2,
             )

@@ -8,6 +8,7 @@
 #
 # Install cron (3× daily at :20, after card refresh :05):
 #   sudo bash scripts/racing_verification_automation.sh --install-cron
+# Uses www-data crontab + config/verification.cron.env (see deploy/racing-verification.cron.env.example)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,7 +16,16 @@ export FVE_METRICS_ROOT="${FVE_METRICS_ROOT:-${ROOT}}"
 export HIBS_RACING_DEPLOY_PATH="${HIBS_RACING_DEPLOY_PATH:-${HOME}/hibs-racing}"
 export HIBS_RACING_FEATURE_STORE="${HIBS_RACING_FEATURE_STORE:-${HIBS_RACING_DEPLOY_PATH}/data/feature_store.sqlite}"
 export RACING_VERIFICATION_JSONL="${RACING_VERIFICATION_JSONL:-${HIBS_RACING_DEPLOY_PATH}/data/verification/settled_races.jsonl}"
-export RACING_VERIFICATION_LOG="${RACING_VERIFICATION_LOG:-/var/log/hibs-racing/verification-automation.log}"
+export RACING_VERIFICATION_LOG="${RACING_VERIFICATION_LOG:-${HIBS_RACING_DEPLOY_PATH}/logs/verification-automation.log}"
+
+# Optional VPS env file (recommended for cron — avoids bare env in crontab)
+ENV_FILE="${RACING_VERIFICATION_ENV_FILE:-${HIBS_RACING_DEPLOY_PATH}/config/verification.cron.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
 
 PY="${FVE_METRICS_ROOT}/.venv/bin/python3"
 [[ -x "${PY}" ]] || PY="python3"
