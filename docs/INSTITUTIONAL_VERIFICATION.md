@@ -105,6 +105,23 @@ HIBS_RACING_FEATURE_STORE=/opt/hibs-racing/data/feature_store.sqlite \
     python -m hibs_racing.daily_refresh --score
 ```
 
+**Production verify** (must exit 0 on VPS):
+
+```bash
+sudo CRON_USER=www-data FVE_METRICS_ROOT=/opt/football-app \
+  HIBS_RACING_DEPLOY_PATH=/opt/hibs-racing \
+  bash /opt/football-app/scripts/verify_production_guards.sh
+```
+
+**Install guarded daily_refresh cron** (if hibs-bet shell not yet updated):
+
+```bash
+sudo FVE_METRICS_ROOT=/opt/football-app HIBS_RACING_DEPLOY_PATH=/opt/hibs-racing \
+  bash /opt/football-app/scripts/install_daily_refresh_guard_cron.sh
+```
+
+hibs-bet should `source deploy/cron-hibs-racing-daily-guard.sh` and call `run_daily_refresh_guarded` instead of bare `daily_refresh.sh`.
+
 If the feature_store flock cannot be acquired within `RACING_FEATURE_STORE_LOCK_WAIT_SEC` (default 60), verification settlement exits **0** with `run_outcome: feature_store_busy` (metrics preserved).
 
 ### Schema migrations (replaces runtime `ALTER TABLE`)
