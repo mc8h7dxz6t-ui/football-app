@@ -209,6 +209,23 @@ def run_racing_verification_pipeline(
     if not pre.get("ok"):
         return _finish(ok=False, status="preflight_failed", hard_fail=True)
 
+    results_path = os.environ.get("RACING_RESULTS_JSON", "").strip()
+    if results_path and Path(results_path).is_file():
+        from metrics.racing_settlement import apply_results_batch
+
+        try:
+            batch = json.loads(Path(results_path).read_text(encoding="utf-8"))
+            races_payload = batch if isinstance(batch, list) else batch.get("races", [])
+            report["settlement"] = apply_results_batch(
+                cfg.feature_store, races_payload, table=cfg.table
+            )
+        except Exception as exc:
+            return _finish(ok=False, status="settlement_failed", error=str(exc)[:200], hard_fail=True)
+
+    from metrics.racing_settlement import settlement_coverage
+
+    report["settlement_coverage"] = settlement_coverage(cfg.feature_store, table=cfg.table)
+
     def _body() -> Dict[str, Any]:
         existing = load_race_ids(cfg.jsonl_path)
         extracted = extract_settled_races_from_db(
@@ -224,14 +241,17 @@ def run_racing_verification_pipeline(
         lines = load_jsonl(cfg.jsonl_path)
         races = []
         parse_errors = 0
+        parse_error_samples: List[str] = []
         for row in lines:
             if "_corrupt_line" in row:
                 parse_errors += 1
                 continue
             try:
                 races.append(racing_record_from_dict(row))
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError) as exc:
                 parse_errors += 1
+                if len(parse_error_samples) < 5:
+                    parse_error_samples.append(str(exc)[:120])
 
         n_races = len(races)
         verify = evaluate_racing_window(
@@ -265,7 +285,7 @@ def run_racing_verification_pipeline(
                 **append_stats,
                 **trim_stats,
             },
-            "window": {"n_races": n_races, "parse_errors": parse_errors},
+            "window": {"n_races": n_races, "parse_errors": parse_errors, "parse_error_samples": parse_error_samples},
             "gates": gates,
             "data_room": str(cfg.data_room_path),
             "institutional_grade": institutional,

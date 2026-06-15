@@ -78,7 +78,10 @@ def test_racing_record_from_dict_jsonl_shape():
         "race_id": "x",
         "target": "win",
         "venue_mapped": True,
-        "runners": [{"runner_id": "a", "model_prob": 0.5, "market_prob": 0.48, "won": True}],
+        "runners": [
+            {"runner_id": "a", "model_prob": 0.5, "market_prob": 0.48, "won": True},
+            {"runner_id": "b", "model_prob": 0.5, "market_prob": 0.52, "won": False},
+        ],
     }
     rec = racing_record_from_dict(raw)
     assert rec.target == "win"

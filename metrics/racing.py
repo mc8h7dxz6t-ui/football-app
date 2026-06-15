@@ -50,7 +50,13 @@ class RacingRecord:
         return [float(r.market_prob) for r in self.runners]  # type: ignore[arg-type]
 
 
-def racing_record_from_dict(raw: Dict[str, Any]) -> RacingRecord:
+def racing_record_from_dict(raw: Dict[str, Any], *, validate: bool = True) -> RacingRecord:
+    if validate:
+        from metrics.racing_validate import validate_race_record
+
+        ok, errs = validate_race_record(raw)
+        if not ok:
+            raise ValueError("; ".join(errs))
     target = str(raw.get("target", "place")).lower()
     if target not in ("win", "place"):
         raise ValueError(f"target must be win or place, got {target!r}")

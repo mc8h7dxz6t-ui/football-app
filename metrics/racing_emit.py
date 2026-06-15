@@ -82,9 +82,16 @@ def to_jsonl_line(record: Dict[str, Any]) -> str:
     return json.dumps(record, separators=(",", ":"), sort_keys=True)
 
 
-def append_jsonl(path: str, record: Dict[str, Any], *, dedupe_race_id: bool = False) -> None:
+def append_jsonl(path: str, record: Dict[str, Any], *, dedupe_race_id: bool = False, validate: bool = True) -> None:
     """Append one line; optional skip if race_id already present in file."""
     from pathlib import Path
+
+    if validate:
+        from metrics.racing_validate import validate_race_record
+
+        ok, errs = validate_race_record(record)
+        if not ok:
+            raise ValueError(f"invalid race record: {'; '.join(errs)}")
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)

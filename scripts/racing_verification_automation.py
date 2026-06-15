@@ -62,7 +62,7 @@ def main() -> None:
     ap.add_argument("--jsonl", default="")
     ap.add_argument("--racing-root", default="")
     ap.add_argument("--no-lock", action="store_true")
-    ap.add_argument("--wait-lock", action="store_true")
+    ap.add_argument("--settle-from", default="", help="JSON file of race results to write before emit")
     ap.add_argument("--json", action="store_true", help="print full report JSON to stdout")
     args = ap.parse_args()
 
@@ -78,6 +78,9 @@ def main() -> None:
     if not args.run:
         ap.print_help()
         raise SystemExit(0)
+
+    if args.settle_from:
+        os.environ["RACING_RESULTS_JSON"] = args.settle_from
 
     cfg = resolve_automation_config(
         feature_store=args.feature_store,
