@@ -1,0 +1,40 @@
+name: FVE CI
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-and-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-pro.txt
+            requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-pro.txt -r requirements.txt
+
+      - name: Pytest (unit + API/WS integration)
+        env:
+          PYTHONPATH: .
+        run: pytest -q tests/
+
+  api-docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: API smoke (redis + uvicorn)
+        run: bash scripts/ci_fve_api_smoke.sh

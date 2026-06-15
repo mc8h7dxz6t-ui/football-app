@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package fve.v1;
+
+// Wire contract between ingest worker and WS gateway (Phase 2).
+// Mirrors pipeline.tick.PriceTick + optional fair-line snapshot.
+
+message PriceTick {
+  string fixture_key = 1;
+  string market = 2;
+  string selection = 3;
+  double odds = 4;
+  string bookmaker = 5;
+  string source = 6;
+  string category = 7;
+  double received_at = 8;
+  int64 sequence = 9;
+  map<string, string> meta = 10;
+}
+
+message FairLine {
+  string fixture_key = 1;
+  double home_prob = 2;
+  double draw_prob = 3;
+  double away_prob = 4;
+  double computed_at = 5;
+}
+
+message LineUpdate {
+  string fixture_key = 1;
+  double ts = 2;
+  bool delta = 3;
+  map<string, MarketChannels> changed_markets = 4;
+  FairLine fair_line = 5;
+  int32 tick_count = 6;
+}
+
+message MarketChannels {
+  map<string, Quote> channels = 1;
+}
+
+message Quote {
+  double odds = 1;
+  string bookmaker = 2;
+  string url = 3;
+}
+
+message BusEnvelope {
+  string type = 1;
+  oneof payload {
+    PriceTick tick = 2;
+    LineUpdate line_update = 3;
+  }
+}

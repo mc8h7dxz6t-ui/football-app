@@ -191,7 +191,7 @@ with scan_tab:
             league_id = LEAGUES[league_name]
             standings = standings_with_xg(league_id, int(season), use_xg)
             odds_api_events = None
-            if merge_odds_api and get_odds_api_key():
+            if merge_odds_api and get_odds_api_key() and not (use_inst_pipeline and api_live):
                 from odds_sources import fetch_odds_api_football
 
                 odds_api_events = fetch_odds_api_football(league_name, get_odds_api_key())
@@ -211,12 +211,6 @@ with scan_tab:
                         continue
                     if home_id not in standings or away_id not in standings:
                         continue
-                    offers = football_offers_for_fixture(
-                        get_odds(fixture_id),
-                        event_label=fixture_label,
-                        league_name=league_name if merge_odds_api else "",
-                        odds_api_events=odds_api_events if merge_odds_api else None,
-                    )
                     if use_inst_pipeline and api_live:
                         try:
                             fve_api.ingest(
@@ -226,6 +220,7 @@ with scan_tab:
                                     "home_team": home_name,
                                     "away_team": away_name,
                                     "event_label": fixture_label,
+                                    "league_name": league_name,
                                 }
                             )
                             vs = fve_api.value_scan(
@@ -262,9 +257,16 @@ with scan_tab:
                                     ]
                                 )
                             continue
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            st.warning(f"Inst++ path failed for {fixture_label}: {exc}")
+                            continue
 
+                    offers = football_offers_for_fixture(
+                        get_odds(fixture_id),
+                        event_label=fixture_label,
+                        league_name=league_name if merge_odds_api else "",
+                        odds_api_events=odds_api_events if merge_odds_api else None,
+                    )
                     shopped = shop_lines(offers)
                     sharp_fair = build_fixture_1x2_sharp_line(shopped)
                     home, away = standings[home_id], standings[away_id]
@@ -497,12 +499,20 @@ with inst_tab:
         try:
             h = fve_api.health()
             st.success("API online")
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Cache", h.get("cache_backend", "—"))
             c2.metric("Line bus", h.get("line_bus", "—"))
             budgets = (h.get("api_budgets") or {}).get("sources") or {}
             odds_rem = (budgets.get("odds_api") or {}).get("remaining")
             c3.metric("Odds API left/hr", odds_rem if odds_rem is not None else "—")
+            ws = h.get("ws") or {}
+            c4.metric("WS clients", ws.get("active_clients", "—"))
+            if ws:
+                st.caption(
+                    f"WS drops: {ws.get('backpressure_drops', 0)} · "
+                    f"bus 60s: {ws.get('bus_messages_per_sec_60s', 0)}/s · "
+                    f"codec: {h.get('wire_codec', '—')}"
+                )
             with st.expander("Full /health JSON"):
                 st.json(h)
         except Exception as exc:

@@ -28,8 +28,10 @@ def serialize_ring_member(tick: PriceTick, *, now: Optional[float] = None) -> st
     return json.dumps(payload, separators=(",", ":"))
 
 
-def parse_ring_member(member: str) -> Optional[PriceTick]:
+def parse_ring_member(member: str | bytes) -> Optional[PriceTick]:
     try:
+        if isinstance(member, bytes):
+            member = member.decode("utf-8")
         data = json.loads(member)
         for k in _RING_META_KEYS:
             data.pop(k, None)

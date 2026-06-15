@@ -57,7 +57,40 @@ Streamlit UI (or Hibs Bet via FVE_API_URL)
         └──► [ arb_worker — dry-run default, £2 stake rails ]
 ```
 
-### Phase 1 — Inst++ Lite (same language, measurable wins)
+### Phase 1 — Inst++ Lite (implemented)
+
+| Item | Env | Status |
+|------|-----|--------|
+| Delta WS payloads | `FVE_WS_DELTA_UPDATES=1` | `line_update` with `mode=delta` + `changed_markets` |
+| Fast serde | `FVE_BUS_CODEC=json\|msgpack` | orjson on cache + pub/sub (stdlib fallback) |
+| WS backpressure | `WS_MAX_PENDING_SENDS=8` | Slow clients disconnected (HTTP 1013) |
+| Dragonfly drop-in | `COMPOSE_PROFILES=dragonfly` | `redis://` compatible — see docker-compose |
+| TCP_NODELAY + split processes | `FVE_TCP_NODELAY=1` | Redis sockets; api/worker/ui separate services |
+
+### Phase 1.5 — Client merge + ops (implemented)
+
+| Item | Env / path | Status |
+|------|------------|--------|
+| WS client delta merge | `FVE_WS_CLIENT_DELTA=0` | Hub expands bus deltas to full `lines` by default |
+| Merge library | `pipeline/ws_lines_merge.py` | Python + JS (`patches/.../fve_ws_lines.js`) |
+| WS telemetry | `/health` → `ws` | `active_clients`, `backpressure_drops`, `bus_messages_per_sec_60s` |
+| Protobuf wire contract | `proto/market_tick.proto` | Phase 2 prep — mirrors `PriceTick` |
+| Hibs upstream unpause | `scripts/vps_unpause_fve_hibs_upstream.sh` | FVE_PAUSED=0 + `FVE_UPSTREAM_MODE=hibs` |
+| Matchbook poll tuning | `FEED_POLL_SEC_MATCHBOOK=0.5` | Bigger win than JSON serde on hot path |
+| Inst++ audit | `scripts/audit_institutional_all.sh` | FVE + football/racing evidence gates |
+| Racing health schema | `docs/RACING_HEALTH_SCHEMA.md` | hibs-racing R5–R7 `/api/health` fields |
+
+### Phase 1.6 — Separate feeds + excellence (implemented)
+
+| Item | Env / path | Status |
+|------|------------|--------|
+| Separate feed chain | `FVE_FEED_MODE=separate` | `composite` feed: matchbook → odds-backup → api-football → scrape-cache |
+| Scrape sidecar | `FVE_SCRAPE_LINES_URL` | HTTP JSON only — scrape risk outside FVE process |
+| Hibs sports via feed | `pipeline/feed_sports.py` | No API-Football burn in `FVE_UPSTREAM_MODE=hibs` |
+| Worker heartbeat | `/health` → `worker` | All ingest modes touch `FVE_WORKER_HEARTBEAT` |
+| Feed chain telemetry | `/health` → `feed_chain` | `sources_tried`, `complete_1x2`, `tick_count` |
+| Streamlit Inst++ scan | `app.py` | No per-fixture book API poll when Inst++ enabled |
+| hibs-bet lines API | `fve_lines_proxy.py` wired in web.py | `/api/fve/lines/<fixture>` |
 
 Do these **before** rewriting in Rust:
 

@@ -9,12 +9,17 @@ from typing import Any, Dict, List, Optional
 
 from engine.devig import devig_1x2
 from feeds.base import FeedAdapter
+from feeds.hibs_upstream_feed import HibsUpstreamFeed
 from feeds.registry import FeedRegistry, build_default_registry
+from feeds.scrape_mode import scrape_watchlist_enabled
+from pipeline.feed_sports import sports_from_registry
+from pipeline.worker_status import touch_worker_heartbeat
 from odds_shopping import shop_lines
 from pipeline.cache import LineCache, get_cache
 from pipeline.circuit_breaker import breakers
 from pipeline.line_bus import get_line_bus
 from pipeline.rate_limits import get_budget
+from pipeline.sports_context import fetch_sports_context, sports_refresh_due
 from pipeline.tick import PriceTick
 
 log = logging.getLogger(__name__)
@@ -101,10 +106,15 @@ def ingest_feed(
             source=feed.name,
             feed_name=feed.name,
         )
+        touch_worker_heartbeat()
         if merge_stats.get("changed", 0) > 0:
             try:
-                view = build_line_view(cache, fixture_key)
-                get_line_bus().publish(fixture_key, {"type": "update", **view})
+                from pipeline.line_delta import build_line_update_message
+
+                lines_view = build_line_view(cache, fixture_key)
+                msg = build_line_update_message(fixture_key, lines_view)
+                if msg:
+                    get_line_bus().publish(fixture_key, msg)
             except Exception:
                 log.exception("line_bus publish failed for %s", fixture_key)
     return {
@@ -138,6 +148,81 @@ def build_line_view(cache: LineCache, fixture_key: str) -> Dict[str, Any]:
     }
 
 
+def build_fixture_bundle(cache: LineCache, fixture_key: str) -> Dict[str, Any]:
+    """Lines + sports context — single payload for WebSocket clients and traders."""
+    lines = build_line_view(cache, fixture_key)
+    sports = cache.get_sports(fixture_key)
+    bundle: Dict[str, Any] = {
+        "fixture_key": fixture_key,
+        "lines": lines,
+        "sports": sports,
+        "ready": {
+            "lines": bool(lines.get("tick_count")),
+            "sports": bool(sports and sports.get("data_quality", {}).get("home_ok")),
+        },
+    }
+    if sports and sports.get("model_probs"):
+        bundle["model_probs"] = sports["model_probs"]
+    return bundle
+
+
+def refresh_sports_context(
+    fixture_key: str,
+    context: Dict[str, Any],
+    *,
+    cache: Optional[LineCache] = None,
+    force: bool = False,
+    registry: Optional[FeedRegistry] = None,
+) -> Dict[str, Any]:
+    """Fetch/cache standings + form stats (slower cadence than odds lines)."""
+    cache = cache or get_cache()
+    cached = cache.get_sports(fixture_key)
+    if not force and cached and not sports_refresh_due(cached):
+        return {"fixture_key": fixture_key, "cached": True, "sports": cached}
+
+    reg = registry or build_default_registry()
+    feed_sports = sports_from_registry(fixture_key, reg, context=context)
+    if feed_sports:
+        cache.put_sports(fixture_key, feed_sports)
+        bundle = build_fixture_bundle(cache, fixture_key)
+        get_line_bus().publish(fixture_key, {"type": "sports_update", **bundle})
+        return {"fixture_key": fixture_key, "cached": False, "sports": feed_sports, "source": "feed"}
+
+    if HibsUpstreamFeed.upstream_mode_enabled() or scrape_mode_enabled():
+        log.warning("sports missing for %s — not calling API-Football", fixture_key)
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached}
+        return {"fixture_key": fixture_key, "error": "hibs upstream sports unavailable"}
+
+    if not context.get("fixture_id"):
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached}
+        return {"fixture_key": fixture_key, "error": "fixture_id required for API-Football sports"}
+
+    budget = get_budget()
+    if not budget.allow("api-football"):
+        log.warning("sports API budget exhausted — serving stale if present")
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached}
+        return {"fixture_key": fixture_key, "error": "sports budget exhausted"}
+
+    try:
+        sports = fetch_sports_context(context)
+        budget.record("api-football", n=2)
+        cache.put_sports(fixture_key, sports)
+        bundle = build_fixture_bundle(cache, fixture_key)
+        get_line_bus().publish(
+            fixture_key,
+            {"type": "sports_update", **bundle},
+        )
+        return {"fixture_key": fixture_key, "cached": False, "sports": sports}
+    except Exception as exc:
+        log.exception("sports refresh failed for %s: %s", fixture_key, exc)
+        if cached:
+            return {"fixture_key": fixture_key, "cached": True, "stale": True, "sports": cached, "error": str(exc)}
+        return {"fixture_key": fixture_key, "error": str(exc)}
+
+
 def ingest_fixture(
     registry: FeedRegistry,
     fixture_key: str,
@@ -162,8 +247,10 @@ def ingest_fixture(
             any_fetched = True
 
     stale = not any_fetched and bool(cache.get_ticks(fixture_key))
+    if ctx.get("fixture_id") or HibsUpstreamFeed.upstream_mode_enabled():
+        refresh_sports_context(fixture_key, ctx, cache=cache, registry=registry)
     view = build_line_view(cache, fixture_key)
-    result = {**view, "stale": stale, "feed_results": feed_results}
+    result = {**build_fixture_bundle(cache, fixture_key), "stale": stale, "feed_results": feed_results}
 
     try:
         from db.store import persist_snapshot

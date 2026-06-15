@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from config.leagues import leagues_for_watchlist
+from config.fotmob_leagues import FOTMOB_LEAGUE_ID
+from feeds.scrape_mode import scrape_watchlist_enabled
 
 log = logging.getLogger(__name__)
 
@@ -107,9 +109,28 @@ def discover_upcoming(
     leagues: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
     """Return fixture keys + ingest contexts for upcoming matches."""
+    days = days_ahead if days_ahead is not None else int(os.environ.get("FVE_WATCHLIST_DAYS", "3"))
+
+    if scrape_watchlist_enabled():
+        from scrapers.fotmob_client import discover_fixtures
+
+        league_map = leagues or leagues_for_watchlist()
+        fotmob_map = {
+            name: FOTMOB_LEAGUE_ID[name]
+            for name in league_map
+            if name in FOTMOB_LEAGUE_ID
+        }
+        if not fotmob_map:
+            fotmob_map = dict(FOTMOB_LEAGUE_ID)
+        keys, contexts = discover_fixtures(fotmob_map, days_ahead=days)
+        if keys:
+            log.info("watchlist fotmob discovered %d fixtures", len(keys))
+            return keys, contexts
+        log.warning("fotmob watchlist empty — try WATCHLIST_FIXTURES")
+
     key = _api_key()
     if not key:
-        log.error("API_SPORTS_KEY not set — cannot auto-discover watchlist")
+        log.error("API_SPORTS_KEY not set — cannot auto-discover watchlist (set FVE_FEED_MODE=scrape or WATCHLIST_FIXTURES)")
         return [], {}
 
     days = days_ahead if days_ahead is not None else int(os.environ.get("FVE_WATCHLIST_DAYS", "3"))
