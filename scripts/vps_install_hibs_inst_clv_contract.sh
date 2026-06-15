@@ -12,6 +12,17 @@ log() { echo "[hibs-inst-clv] $*"; }
 
 [[ -d "${APP}/src/hibs_predictor" ]] || { echo "ERROR: ${APP} not found" >&2; exit 1; }
 
+if [[ -x "${APP}/scripts/vps_ensure_hibs_bet_venv.sh" ]]; then
+  bash "${APP}/scripts/vps_ensure_hibs_bet_venv.sh"
+elif [[ -f "${APP}/../football-app/scripts/vps_ensure_hibs_bet_venv.sh" ]]; then
+  bash "${APP}/../football-app/scripts/vps_ensure_hibs_bet_venv.sh"
+else
+  ENSURE_RAW="${HIBS_INST_ENSURE_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/${BRANCH}/scripts/vps_ensure_hibs_bet_venv.sh}"
+  curl -fsSL "${ENSURE_RAW}" | bash
+fi
+
+HIBS_PY="${APP}/.venv/bin/python"
+
 install_file() {
   local rel="$1"
   local dest="${APP}/${rel}"
@@ -38,6 +49,6 @@ fi
 
 log "verify institutional-check"
 cd "${APP}"
-PYTHONPATH=src python3 -m hibs_predictor.main institutional-check 2>&1 | tail -20 || true
+PYTHONPATH=src "${HIBS_PY}" -m hibs_predictor.main institutional-check 2>&1 | tail -20 || true
 
 log "done"

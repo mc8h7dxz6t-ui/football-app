@@ -14,17 +14,20 @@ RAW="https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/${BRANCH}"
 
 log() { echo "[fve-scrape] $*"; }
 
-log "1/6 — install hibs-bet FVE lines proxy"
+log "1/7 — ensure hibs-bet venv + deps"
+curl -fsSL "${RAW}/scripts/vps_ensure_hibs_bet_venv.sh" | sudo bash
+
+log "2/7 — install hibs-bet FVE lines proxy"
 curl -fsSL "${RAW}/scripts/vps_install_hibs_fve_lines.sh" | sudo HIBS_FVE_LINES_RAW="${RAW}/patches/hibs-bet/files" bash
 
-log "2/6 — install Inst++ CLV + market contract on hibs-bet"
+log "3/7 — install Inst++ CLV + market contract on hibs-bet"
 curl -fsSL "${RAW}/scripts/vps_install_hibs_inst_clv_contract.sh" | sudo HIBS_INST_RAW="${RAW}/patches/hibs-bet/files" bash || log "WARN inst CLV install skipped"
 
-log "3/6 — scrape lines directory"
+log "4/7 — scrape lines directory"
 mkdir -p "${SCRAPE_DIR}"
 chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" "${SCRAPE_DIR}" 2>/dev/null || true
 
-log "4/6 — FVE .env scrape-heavy block"
+log "5/7 — FVE .env scrape-heavy block"
 mkdir -p "${FVE_ROOT}"
 ENV_FILE="${FVE_ROOT}/.env"
 touch "${ENV_FILE}"
@@ -48,14 +51,14 @@ upsert WS_MAX_PENDING_SENDS 8
 upsert FEED_POLL_SEC_MATCHBOOK 0.5
 log "updated ${ENV_FILE}"
 
-log "4/5 — cron: hibs lines collector every 5 min"
+log "6/7 — cron: hibs lines collector every 5 min"
 CRON_LINE="*/5 * * * * cd ${FVE_ROOT} && HIBS_UPSTREAM_BASE_URL=${HIBS_URL} FVE_SCRAPE_LINES_DIR=${SCRAPE_DIR} /usr/bin/python3 scripts/fve_hibs_lines_collector.py --from-watchlist >> /var/log/fve/lines-collector.log 2>&1"
 mkdir -p /var/log/fve
 touch /var/log/fve/lines-collector.log
 ( crontab -l 2>/dev/null | grep -v 'fve_hibs_lines_collector' || true; echo "${CRON_LINE}" ) | crontab -
 log "crontab updated"
 
-log "5/5 — initial collect + restart FVE"
+log "7/7 — initial collect + restart FVE"
 if [[ -f "${FVE_ROOT}/scripts/fve_hibs_lines_collector.py" ]]; then
   (cd "${FVE_ROOT}" && HIBS_UPSTREAM_BASE_URL="${HIBS_URL}" FVE_SCRAPE_LINES_DIR="${SCRAPE_DIR}" \
     python3 scripts/fve_hibs_lines_collector.py --from-watchlist) || true
