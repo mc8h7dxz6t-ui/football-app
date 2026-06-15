@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from typing import Any, Dict, List, Optional
 
+from pipeline.codec import dumps as codec_dumps, loads as codec_loads
+from pipeline.redis_factory import create_redis_client
 from pipeline.redis_tick_ring import MemoryTickRing, RedisTickRing, TickRing
 from pipeline.tick import PriceTick
 from pipeline.tick_history import merge_snapshot, peak_ticks_in_window
@@ -22,14 +23,13 @@ class LineCache:
     def __init__(self, redis_url: str = _REDIS_URL, ttl_sec: int = _TTL_SEC) -> None:
         self.ttl_sec = ttl_sec
         self.peak_window_sec = _PEAK_WINDOW_SEC
+        self._redis_url = redis_url
         self._memory: Dict[str, Dict[str, Any]] = {}
         self._rings_mem: Dict[str, TickRing] = {}
         self._redis = None
         self._redis_ok = False
         try:
-            import redis
-
-            self._redis = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=1)
+            self._redis = create_redis_client(url=redis_url, decode_responses=False)
             self._redis.ping()
             self._redis_ok = True
         except Exception:
@@ -91,11 +91,11 @@ class LineCache:
             "peak_window_sec": self.peak_window_sec,
             "history_backend": self.backend,
         }
-        payload = [t.to_dict() for t in snapshot]
+        payload = codec_dumps([t.to_dict() for t in snapshot])
         if self._redis_ok and self._redis:
             pipe = self._redis.pipeline()
-            pipe.setex(self._key_ticks(fixture_key), self.ttl_sec, json.dumps(payload))
-            pipe.setex(self._key_meta(fixture_key), self.ttl_sec, json.dumps(meta))
+            pipe.setex(self._key_ticks(fixture_key), self.ttl_sec, payload)
+            pipe.setex(self._key_meta(fixture_key), self.ttl_sec, codec_dumps(meta))
             pipe.execute()
         else:
             self._memory[self._key_ticks(fixture_key)] = {
@@ -155,7 +155,7 @@ class LineCache:
     def put_sports(self, fixture_key: str, sports: Dict[str, Any], *, ttl_sec: Optional[int] = None) -> None:
         ttl = int(ttl_sec or sports.get("ttl_sec") or int(os.environ.get("SPORTS_CACHE_TTL_SEC", "3600")))
         if self._redis_ok and self._redis:
-            self._redis.setex(self._key_sports(fixture_key), ttl, json.dumps(sports, default=str))
+            self._redis.setex(self._key_sports(fixture_key), ttl, codec_dumps(sports))
         else:
             self._memory[self._key_sports(fixture_key)] = {
                 "data": sports,
@@ -169,16 +169,25 @@ class LineCache:
     def _get_json(self, key: str) -> Any:
         if self._redis_ok and self._redis:
             val = self._redis.get(key)
-            return json.loads(val) if val else None
+            if not val:
+                return None
+            return codec_loads(val)
         entry = self._memory.get(key)
         if not entry or entry.get("expires", 0) < time.time():
             return None
-        return entry.get("data")
+        data = entry.get("data")
+        if isinstance(data, (bytes, str)):
+            return codec_loads(data)
+        return data
 
     def list_fixture_keys(self, pattern: str = "fve:ticks:*") -> List[str]:
         if self._redis_ok and self._redis:
             keys = self._redis.keys(pattern.replace("*", "*"))
-            return [k.replace("fve:ticks:", "") for k in keys]
+            out: List[str] = []
+            for k in keys:
+                text = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+                out.append(text.replace("fve:ticks:", ""))
+            return out
         return [k.replace("fve:ticks:", "") for k in self._memory if k.startswith("fve:ticks:")]
 
 

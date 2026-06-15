@@ -104,8 +104,12 @@ def ingest_feed(
         )
         if merge_stats.get("changed", 0) > 0:
             try:
-                bundle = build_fixture_bundle(cache, fixture_key)
-                get_line_bus().publish(fixture_key, {"type": "line_update", **bundle})
+                from pipeline.line_delta import build_line_update_message
+
+                lines_view = build_line_view(cache, fixture_key)
+                msg = build_line_update_message(fixture_key, lines_view)
+                if msg:
+                    get_line_bus().publish(fixture_key, msg)
             except Exception:
                 log.exception("line_bus publish failed for %s", fixture_key)
     return {

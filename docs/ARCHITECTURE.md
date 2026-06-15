@@ -57,7 +57,15 @@ Streamlit UI (or Hibs Bet via FVE_API_URL)
         └──► [ arb_worker — dry-run default, £2 stake rails ]
 ```
 
-### Phase 1 — Inst++ Lite (same language, measurable wins)
+### Phase 1 — Inst++ Lite (implemented)
+
+| Item | Env | Status |
+|------|-----|--------|
+| Delta WS payloads | `FVE_WS_DELTA_UPDATES=1` | `line_update` with `mode=delta` + `changed_markets` |
+| Fast serde | `FVE_BUS_CODEC=json\|msgpack` | orjson on cache + pub/sub (stdlib fallback) |
+| WS backpressure | `WS_MAX_PENDING_SENDS=8` | Slow clients disconnected (HTTP 1013) |
+| Dragonfly drop-in | `COMPOSE_PROFILES=dragonfly` | `redis://` compatible — see docker-compose |
+| TCP_NODELAY + split processes | `FVE_TCP_NODELAY=1` | Redis sockets; api/worker/ui separate services |
 
 Do these **before** rewriting in Rust:
 

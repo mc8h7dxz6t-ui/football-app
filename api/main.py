@@ -58,6 +58,8 @@ class ValueScanRequest(BaseModel):
 @app.get("/health")
 def health() -> Dict[str, Any]:
     from execution.risk import RiskConfig
+    from pipeline.codec import codec_name
+    from pipeline.redis_factory import redis_backend_label
 
     cache = get_cache()
     risk = RiskConfig()
@@ -65,6 +67,10 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "cache_backend": cache.backend,
         "line_bus": get_line_bus().backend,
+        "wire_codec": codec_name(),
+        "redis_backend": redis_backend_label(),
+        "ws_max_pending_sends": int(os.environ.get("WS_MAX_PENDING_SENDS", "8")),
+        "ws_delta_updates": os.environ.get("FVE_WS_DELTA_UPDATES", "1"),
         "api_budgets": get_budget().status(),
         "breakers": breakers.all_status(),
         "execution": risk.status(),

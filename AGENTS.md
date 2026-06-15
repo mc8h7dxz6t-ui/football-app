@@ -49,6 +49,7 @@ Line shopping lives in `odds_shopping.py` + `bookmakers.py`; multi-source merge 
 | Hands-off stack | `cp .env.example .env` → `bash scripts/run_stack.sh` (Redis + API + auto worker + UI) |
 | Ingest worker | `python worker.py --auto` (discover fixtures) or `--fixtures 'key:id:matchbook_id'` |
 | Preflight | `bash scripts/preflight_fve.sh` — budgets + optional line cache check |
+| CI | GitHub Actions `FVE CI` — `pytest tests/` + optional `scripts/ci_fve_api_smoke.sh` |
 | Exchange poll override | `FEED_POLL_SEC_MATCHBOOK=0.5` |
 | Intra-window peaks | Redis **ZSET** rings per market; `PEAK_ODDS_WINDOW_SEC=5` |
 | Async scheduler | Default in `worker.py`; `--sync` for blocking loop |

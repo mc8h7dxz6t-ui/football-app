@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from feeds.api_football_feed import ApiFootballFeed
 from feeds.betfair_feed import BetfairFeed
 from feeds.base import FeedAdapter
+from feeds.hibs_upstream_feed import HibsUpstreamFeed
 from feeds.matchbook_feed import MatchbookFeed
 from feeds.odds_api_feed import OddsApiFeed
 from feeds.pinnacle_feed import PinnacleFeed
@@ -33,12 +34,18 @@ class FeedRegistry:
 
 
 def build_default_registry() -> FeedRegistry:
-    feeds: List[FeedAdapter] = [
-        MatchbookFeed(),
-        BetfairFeed(),
-        PinnacleFeed(),
-        ApiFootballFeed(),
-    ]
-    if os.environ.get("ENABLE_ODDS_API_FEED", "").strip().lower() in ("1", "true", "yes", "on"):
-        feeds.append(OddsApiFeed())
+    feeds: List[FeedAdapter] = []
+    if HibsUpstreamFeed.upstream_mode_enabled():
+        feeds.append(HibsUpstreamFeed())
+    else:
+        feeds.extend(
+            [
+                MatchbookFeed(),
+                BetfairFeed(),
+                PinnacleFeed(),
+                ApiFootballFeed(),
+            ]
+        )
+        if os.environ.get("ENABLE_ODDS_API_FEED", "").strip().lower() in ("1", "true", "yes", "on"):
+            feeds.append(OddsApiFeed())
     return FeedRegistry(feeds)

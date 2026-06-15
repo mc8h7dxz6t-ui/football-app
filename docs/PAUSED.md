@@ -18,10 +18,21 @@ API-Football, Odds API, or Matchbook quota.
 
 ## Resume later (pick one)
 
-1. Dedicated `API_SPORTS_KEY` for FVE only, or  
-2. Hibs exposes lines → FVE consumes `FVE_API_URL` (no duplicate ingest)
+1. **Dedicated keys** — `FVE_PAUSED=0` and your own `API_SPORTS_KEY` (and optional Matchbook / Odds API).
+2. **Hibs upstream** — hibs-bet exposes cached lines; FVE polls `/api/fve/lines/{fixture}` (no book API quota burn):
+   ```bash
+   # On VPS (hibs-bet)
+   curl -fsSL .../scripts/vps_install_hibs_fve_lines.sh | sudo bash
+   ```
+   ```bash
+   # FVE .env
+   FVE_PAUSED=0
+   FVE_UPSTREAM_MODE=hibs
+   HIBS_UPSTREAM_BASE_URL=https://hibs-bet.co.uk
+   HIBS_UPSTREAM_TOKEN=   # optional — same as hibs FVE_LINES_TOKEN
+   ```
 
-Unset pause:
+Unset pause (dedicated-key path only):
 
 ```bash
 # .env
