@@ -65,13 +65,20 @@ Reads `score` / `place_prob` + `finish_position` + `win_decimal` from SQLite
 **In-process (hibs-racing):** copy `integrations/hibs_racing/settled_race_hook.py` into
 hibs-racing and call `emit_race_from_scored_runners()` when a race settles.
 
-Add to VPS daily cron (after value lane refresh):
+**Automated (recommended — cron-safe):**
 
 ```bash
-FVE_METRICS_REPO=/opt/football-app  # or football-app checkout path
-python "${FVE_METRICS_REPO}/scripts/emit_racing_verification_jsonl.py" \
-  --feature-store /opt/hibs-racing/data/feature_store.sqlite
+# After daily refresh (:05) — run at :20 UTC
+FVE_METRICS_ROOT=/opt/football-app HIBS_RACING_DEPLOY_PATH=/opt/hibs-racing \
+  bash scripts/racing_verification_automation.sh --run
+
+# Install 06:20 / 12:20 / 17:20 UTC
+sudo bash scripts/racing_verification_automation.sh --install-cron
 ```
+
+Pipeline: **flock** → emit new races → trim window (2500 max) → verify → `data_room_racing.json` + `automation_state.json`. Thin window (&lt;1000 races) exits **0** (`accumulating`); hard fail only if DB missing.
+
+See `deploy/cron-racing-verification.snippet.sh` for hibs-bet `cron-hibs-racing-daily.sh` hook.
 
 Macro Brier per race:
 
