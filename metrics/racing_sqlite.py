@@ -8,9 +8,16 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from metrics.racing_emit import (
     build_settled_race_record,
-    decimal_to_implied_prob,
-    normalize_race_probs,
     runner_record,
+)
+from metrics.racing_measurement import (
+    CONFIG_HASH_COLS,
+    ODDS_SOURCE_COLS,
+    RACE_DATE_COLS,
+    build_export_meta,
+    market_prob_for_target,
+    model_probs_for_export,
+    runners_fully_paired,
 )
 
 # Column aliases (first match wins per role).
@@ -156,6 +163,9 @@ def _projection_columns(
     pp_col: Optional[str],
     ts_col: Optional[str],
     settled_col: Optional[str],
+    race_date_col: Optional[str],
+    odds_source_col: Optional[str],
+    config_hash_col: Optional[str],
 ) -> List[str]:
     """Columns required for export — never SELECT * (snapshots carry huge JSON blobs)."""
     seen: set[str] = set()
@@ -163,6 +173,7 @@ def _projection_columns(
     for col in (
         race_col,
         runner_col,
+        race_date_col,
         venue_col,
         mapped_col,
         pos_col,
@@ -171,6 +182,8 @@ def _projection_columns(
         win_col,
         pp_col,
         ts_col,
+        odds_source_col,
+        config_hash_col,
         settled_col,
     ):
         if col and col not in seen:
@@ -222,6 +235,8 @@ def _build_race_record(
     mkt_place_col: Optional[str],
     win_col: Optional[str],
     ts_col: Optional[str],
+    source_table: str,
+    require_paired_place_market: bool,
 ) -> Optional[Dict[str, Any]]:
     race_rows = _dedupe_race_rows(race_rows, runner_col=runner_col, ts_col=ts_col)
     if len(race_rows) < 2:
@@ -237,7 +252,7 @@ def _build_race_record(
             raw_model.append(float(v) if v is not None else 0.0)
         except (TypeError, ValueError):
             raw_model.append(0.0)
-    model_probs = normalize_race_probs(raw_model) if any(raw_model) else [0.0] * len(race_rows)
+    model_probs = model_probs_for_export(target, raw_model, model_col=model_col)
 
     runners_out: List[Dict[str, Any]] = []
     for row, mp in zip(race_rows, model_probs):
@@ -250,11 +265,11 @@ def _build_race_record(
                 position = None
         won, placed = _outcome_flags(position, target=target, place_positions=pp)
 
-        market_prob = None
-        if mkt_place_col:
-            market_prob = decimal_to_implied_prob(_row_get(row, mkt_place_col))
-        if market_prob is None and win_col:
-            market_prob = decimal_to_implied_prob(_row_get(row, win_col))
+        place_dec = _row_get(row, mkt_place_col) if mkt_place_col else None
+        win_dec = _row_get(row, win_col) if win_col else None
+        market_prob, mkt_src = market_prob_for_target(
+            target, place_decimal=place_dec, win_decimal=win_dec
+        )
 
         runners_out.append(
             runner_record(
@@ -266,10 +281,17 @@ def _build_race_record(
             )
         )
 
+    if target == "place" and require_paired_place_market and not runners_fully_paired(runners_out):
+        return None
+
     if target == "win" and not any(r["won"] for r in runners_out):
         return None
     if target == "place" and not any(r["placed"] for r in runners_out):
         return None
+
+    market_col_label = mkt_place_col if target == "place" else (win_col or mkt_place_col)
+    if target == "place":
+        market_col_label = mkt_place_col
 
     return build_settled_race_record(
         race_id=rid,
@@ -278,6 +300,16 @@ def _build_race_record(
         venue_id=str(race_meta.get("venue_id") or ""),
         venue_mapped=venue_mapped,
         place_positions=pp,
+        race_date=race_meta.get("race_date"),
+        meta=build_export_meta(
+            source_table=source_table,
+            target=target,
+            model_col=model_col,
+            market_col=market_col_label,
+            scored_at=race_meta.get("scored_at"),
+            odds_source=race_meta.get("odds_source"),
+            config_hash=race_meta.get("config_hash"),
+        ),
     )
 
 
@@ -287,9 +319,29 @@ def _race_meta_from_rows(
     venue_col: Optional[str],
     mapped_col: Optional[str],
     pp_col: Optional[str],
+    race_date_col: Optional[str],
+    ts_col: Optional[str],
+    odds_source_col: Optional[str],
+    config_hash_col: Optional[str],
 ) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
     for row in race_rows:
+        if race_date_col and not meta.get("race_date"):
+            rd = _row_get(row, race_date_col)
+            if rd is not None and str(rd).strip():
+                meta["race_date"] = str(rd)[:10]
+        if ts_col and not meta.get("scored_at"):
+            ts = _row_get(row, ts_col)
+            if ts is not None:
+                meta["scored_at"] = str(ts)
+        if odds_source_col and not meta.get("odds_source"):
+            osrc = _row_get(row, odds_source_col)
+            if osrc is not None:
+                meta["odds_source"] = str(osrc)
+        if config_hash_col and not meta.get("config_hash"):
+            ch = _row_get(row, config_hash_col)
+            if ch is not None:
+                meta["config_hash"] = str(ch)
         if venue_col and not meta.get("venue_id"):
             meta["venue_id"] = str(_row_get(row, venue_col) or "")
         if mapped_col and "venue_mapped" not in meta:
@@ -314,10 +366,13 @@ def extract_settled_races_from_db(
     place_positions: int = 3,
     table: Optional[str] = None,
     only_settled: bool = True,
+    require_paired_place_market: bool = True,
 ) -> List[Dict[str, Any]]:
     """Group sqlite rows into settled race records for JSONL export."""
     if target not in ("win", "place"):
         raise ValueError("target must be win or place")
+    if target != "place":
+        require_paired_place_market = False
 
     con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=30)
     con.row_factory = sqlite3.Row
@@ -338,6 +393,9 @@ def extract_settled_races_from_db(
         settled_col = _pick(cols, SETTLED_FLAG_COLS)
         pp_col = _pick(cols, PLACE_POSITIONS_COLS)
         ts_col = _pick(cols, ROW_DEDUP_TS_COLS)
+        race_date_col = _pick(cols, RACE_DATE_COLS)
+        odds_source_col = _pick(cols, ODDS_SOURCE_COLS)
+        config_hash_col = _pick(cols, CONFIG_HASH_COLS)
         proj_cols = _projection_columns(
             race_col=race_col,
             runner_col=runner_col,
@@ -350,6 +408,9 @@ def extract_settled_races_from_db(
             pp_col=pp_col,
             ts_col=ts_col,
             settled_col=settled_col,
+            race_date_col=race_date_col,
+            odds_source_col=odds_source_col,
+            config_hash_col=config_hash_col,
         )
         col_sql = ", ".join(f"[{c}]" for c in proj_cols)
 
@@ -367,6 +428,10 @@ def extract_settled_races_from_db(
         pos_filter = ""
         if only_settled and pos_col:
             pos_filter = f" AND [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
+        if target == "place" and require_paired_place_market and mkt_place_col:
+            pos_filter += (
+                f" AND [{mkt_place_col}] IS NOT NULL AND CAST([{mkt_place_col}] AS REAL) > 1"
+            )
 
         for batch_start in range(0, len(race_ids), _RACE_BATCH_SIZE):
             batch = race_ids[batch_start : batch_start + _RACE_BATCH_SIZE]
@@ -390,6 +455,10 @@ def extract_settled_races_from_db(
                     venue_col=venue_col,
                     mapped_col=mapped_col,
                     pp_col=pp_col,
+                    race_date_col=race_date_col,
+                    ts_col=ts_col,
+                    odds_source_col=odds_source_col,
+                    config_hash_col=config_hash_col,
                 )
                 rec = _build_race_record(
                     rid,
@@ -403,6 +472,8 @@ def extract_settled_races_from_db(
                     mkt_place_col=mkt_place_col,
                     win_col=win_col,
                     ts_col=ts_col,
+                    source_table=src,
+                    require_paired_place_market=require_paired_place_market,
                 )
                 if rec is not None:
                     records.append(rec)

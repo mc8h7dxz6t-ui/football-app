@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from metrics.racing import evaluate_racing_window, racing_record_from_dict
 from metrics.racing_jsonl_store import append_records, load_jsonl, load_race_ids, trim_jsonl
+from metrics.racing_measurement import filter_races_after_cutoff, measurement_contract_summary
 from metrics.racing_sqlite import (
     MODEL_PROB_COLS,
     POSITION_COLS,
@@ -36,6 +37,9 @@ class RacingAutomationConfig:
     min_races_for_verify: int = 1000
     min_races_soft_ok: int = 1
     oos_declared: bool = True
+    train_cutoff: Optional[str] = None
+    require_paired_place_market: bool = True
+    min_paired_pct: float = 0.95
 
 
 def _utc_iso() -> str:
@@ -115,6 +119,11 @@ def resolve_automation_config(
         table=(os.environ.get("RACING_VERIFICATION_TABLE") or "").strip() or None,
         max_races_in_file=int(os.environ.get("RACING_VERIFICATION_MAX_RACES", "2500")),
         min_races_for_verify=int(os.environ.get("RACING_VERIFICATION_MIN_RACES", "1000")),
+        train_cutoff=(os.environ.get("RACING_VERIFICATION_TRAIN_CUTOFF") or "").strip()[:10] or None,
+        require_paired_place_market=os.environ.get(
+            "RACING_VERIFICATION_REQUIRE_PAIRED_PLACE_MARKET", "1"
+        ).strip().lower() not in ("0", "false", "no", "off"),
+        min_paired_pct=float(os.environ.get("RACING_VERIFICATION_MIN_PAIRED_PCT", "0.95")),
     )
 
 
@@ -227,6 +236,8 @@ def run_racing_verification_pipeline(
             "feature_store": str(cfg.feature_store),
             "jsonl_path": str(cfg.jsonl_path),
             "target": cfg.target,
+            "train_cutoff": cfg.train_cutoff,
+            "require_paired_place_market": cfg.require_paired_place_market,
         },
     }
 
@@ -305,18 +316,20 @@ def run_racing_verification_pipeline(
             place_positions=cfg.place_positions,
             table=cfg.table,
             only_settled=True,
+            require_paired_place_market=cfg.require_paired_place_market,
         )
         append_stats = append_records(cfg.jsonl_path, extracted, existing_ids=existing)
         trim_stats = trim_jsonl(cfg.jsonl_path, max_races=cfg.max_races_in_file)
 
         lines = load_jsonl(cfg.jsonl_path)
+        raw_rows = [r for r in lines if "_corrupt_line" not in r and r.get("race_id")]
+        oos_rows, oos_stats = filter_races_after_cutoff(raw_rows, cfg.train_cutoff)
+        oos_enforced = bool(oos_stats.get("oos_enforced"))
+
         races = []
         parse_errors = 0
         parse_error_samples: List[str] = []
-        for row in lines:
-            if "_corrupt_line" in row:
-                parse_errors += 1
-                continue
+        for row in oos_rows:
             try:
                 races.append(racing_record_from_dict(row))
             except (ValueError, KeyError, TypeError) as exc:
@@ -329,6 +342,10 @@ def run_racing_verification_pipeline(
             races,
             min_races=cfg.min_races_for_verify,
             oos_declared=cfg.oos_declared,
+            oos_enforced=oos_enforced,
+            train_cutoff=cfg.train_cutoff,
+            require_paired_market=cfg.require_paired_place_market,
+            min_paired_pct=cfg.min_paired_pct,
         ) if n_races else {"error": "no_races", "n_races": 0}
 
         cfg.data_room_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,11 +363,15 @@ def run_racing_verification_pipeline(
         else:
             status = "verified_not_institutional"
 
+        contract = measurement_contract_summary(raw_rows)
+
         return {
             "ok": True,
             "status": status,
             "hard_fail": False,
             "thin_window": thin,
+            "oos_filter": oos_stats,
+            "measurement_contract": contract,
             "emit": {
                 "races_in_db_settled": len(extracted),
                 **append_stats,
@@ -358,6 +379,7 @@ def run_racing_verification_pipeline(
             },
             "window": {
                 "n_races": n_races,
+                "n_races_in_jsonl": len(raw_rows),
                 "parse_errors": parse_errors,
                 "parse_error_samples": parse_error_samples,
                 "max_races_cap": cfg.max_races_in_file,
