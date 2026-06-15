@@ -11,6 +11,7 @@ from metrics.calibration import calibration_table_all_legs, calibration_table_to
 from metrics.data_room import build_data_room_export, institutional_gates
 from metrics.murphy import murphy_decomposition
 from metrics.racing import evaluate_racing_window, racing_record_from_dict
+from metrics.racing_emit import append_jsonl, build_settled_race_record
 
 __all__ = [
     "brier_macro",
@@ -25,4 +26,6 @@ __all__ = [
     "institutional_gates",
     "evaluate_racing_window",
     "racing_record_from_dict",
+    "append_jsonl",
+    "build_settled_race_record",
 ]

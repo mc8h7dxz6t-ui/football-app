@@ -46,6 +46,33 @@ Records shape:
 | `win` | exactly one 1 | win-ranker verification |
 | `place` | top-k placers = 1 | **hibs-racing place picker** |
 
+### Wire LightGBM ranker → JSONL
+
+After ``fetch-cards --score`` (or settlement), emit one line per settled race:
+
+**From feature_store (batch — no hibs-racing code change):**
+
+```bash
+python scripts/emit_racing_verification_jsonl.py \
+  --feature-store ~/hibs-racing/data/feature_store.sqlite \
+  --output data/verification/settled_races.jsonl \
+  --target place --verify
+```
+
+Reads `score` / `place_prob` + `finish_position` + `win_decimal` from SQLite
+(typically `upcoming_runners` after results land).
+
+**In-process (hibs-racing):** copy `integrations/hibs_racing/settled_race_hook.py` into
+hibs-racing and call `emit_race_from_scored_runners()` when a race settles.
+
+Add to VPS daily cron (after value lane refresh):
+
+```bash
+FVE_METRICS_REPO=/opt/football-app  # or football-app checkout path
+python "${FVE_METRICS_REPO}/scripts/emit_racing_verification_jsonl.py" \
+  --feature-store /opt/hibs-racing/data/feature_store.sqlite
+```
+
 Macro Brier per race:
 
 \[
