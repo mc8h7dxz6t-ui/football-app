@@ -15,7 +15,88 @@ if str(ROOT) not in sys.path:
 
 from metrics.racing import evaluate_racing_window, racing_record_from_dict
 from metrics.racing_measurement import filter_races_after_cutoff, measurement_contract_summary
-from metrics.racing_sqlite import extract_settled_races_from_db
+from metrics.racing_sqlite import (
+    MARKET_PLACE_COLS,
+    POSITION_COLS,
+    WIN_DECIMAL_COLS,
+    _columns,
+    _pick,
+    extract_settled_races_from_db,
+)
+
+
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def sqlite_place_odds_stats(db: Path, *, table: str = "scored_runner_snapshots") -> dict:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        if not _table_exists(con, table):
+            return {"ok": False, "error": f"table_missing:{table}"}
+
+        cols = _columns(con, table)
+        pos_col = _pick(cols, POSITION_COLS)
+        place_col = _pick(cols, MARKET_PLACE_COLS)
+        win_col = _pick(cols, WIN_DECIMAL_COLS)
+
+        if not pos_col:
+            return {
+                "ok": False,
+                "error": "no_position_column",
+                "table": table,
+                "columns_sample": cols[:20],
+            }
+
+        total = int(
+            con.execute(
+                f"SELECT COUNT(*) FROM [{table}] "
+                f"WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0"
+            ).fetchone()[0]
+        )
+
+        place_odds = 0
+        if place_col:
+            place_odds = int(
+                con.execute(
+                    f"""
+                    SELECT COUNT(*) FROM [{table}]
+                    WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0
+                      AND [{place_col}] IS NOT NULL AND CAST([{place_col}] AS REAL) > 1
+                    """
+                ).fetchone()[0]
+            )
+
+        win_odds = 0
+        if win_col:
+            win_odds = int(
+                con.execute(
+                    f"""
+                    SELECT COUNT(*) FROM [{table}]
+                    WHERE [{pos_col}] IS NOT NULL AND CAST([{pos_col}] AS REAL) > 0
+                      AND [{win_col}] IS NOT NULL AND CAST([{win_col}] AS REAL) > 1
+                    """
+                ).fetchone()[0]
+            )
+
+        return {
+            "ok": True,
+            "table": table,
+            "position_column": pos_col,
+            "place_odds_column": place_col,
+            "win_odds_column": win_col,
+            "settled_rows": total,
+            "with_place_odds": place_odds,
+            "with_win_odds": win_odds,
+            "place_odds_pct": round(100.0 * place_odds / total, 2) if total else 0.0,
+            "paired_export_viable": bool(place_col and place_odds > 0),
+        }
+    finally:
+        con.close()
 
 
 def _load_jsonl(path: Path) -> list:
@@ -28,36 +109,6 @@ def _load_jsonl(path: Path) -> list:
             continue
         rows.append(json.loads(line))
     return rows
-
-
-def sqlite_place_odds_stats(db: Path) -> dict:
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        total = con.execute(
-            "SELECT COUNT(*) FROM scored_runner_snapshots WHERE finish_pos > 0"
-        ).fetchone()[0]
-        place_odds = con.execute(
-            """
-            SELECT COUNT(*) FROM scored_runner_snapshots
-            WHERE finish_pos > 0 AND offered_place_decimal IS NOT NULL
-              AND CAST(offered_place_decimal AS REAL) > 1
-            """
-        ).fetchone()[0]
-        win_odds = con.execute(
-            """
-            SELECT COUNT(*) FROM scored_runner_snapshots
-            WHERE finish_pos > 0 AND win_decimal IS NOT NULL
-              AND CAST(win_decimal AS REAL) > 1
-            """
-        ).fetchone()[0]
-        return {
-            "settled_rows": int(total),
-            "with_offered_place_decimal": int(place_odds),
-            "with_win_decimal": int(win_odds),
-            "place_odds_pct": round(100.0 * place_odds / total, 2) if total else 0.0,
-        }
-    finally:
-        con.close()
 
 
 def main() -> None:
@@ -73,13 +124,15 @@ def main() -> None:
 
     if args.feature_store and args.feature_store.is_file():
         report["sqlite"] = sqlite_place_odds_stats(args.feature_store)
+        sqlite_ok = report["sqlite"].get("paired_export_viable", False)
         sample = extract_settled_races_from_db(
             args.feature_store,
             table="scored_runner_snapshots",
             target="place",
-            require_paired_place_market=True,
+            require_paired_place_market=sqlite_ok,
         )
         report["extract_paired_sample"] = {
+            "require_paired_place_market": sqlite_ok,
             "races": len(sample),
             "contract": measurement_contract_summary(sample[: min(500, len(sample))]),
         }

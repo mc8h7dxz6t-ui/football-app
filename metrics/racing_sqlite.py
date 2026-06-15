@@ -268,7 +268,10 @@ def _build_race_record(
         place_dec = _row_get(row, mkt_place_col) if mkt_place_col else None
         win_dec = _row_get(row, win_col) if win_col else None
         market_prob, mkt_src = market_prob_for_target(
-            target, place_decimal=place_dec, win_decimal=win_dec
+            target,
+            place_decimal=place_dec,
+            win_decimal=win_dec,
+            place_column=mkt_place_col,
         )
 
         runners_out.append(

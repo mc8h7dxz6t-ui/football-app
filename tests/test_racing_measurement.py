@@ -24,8 +24,10 @@ def test_win_model_probs_normalized():
 
 
 def test_place_market_ignores_win_decimal():
-    p, src = market_prob_for_target("place", place_decimal=4.0, win_decimal=2.0)
-    assert src == "offered_place_decimal"
+    p, src = market_prob_for_target(
+        "place", place_decimal=4.0, win_decimal=2.0, place_column="place_decimal"
+    )
+    assert src == "place_decimal"
     assert abs(p - 0.25) < 1e-9
 
 

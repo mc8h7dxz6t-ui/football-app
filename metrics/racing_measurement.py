@@ -45,11 +45,13 @@ def market_prob_for_target(
     *,
     place_decimal: Any = None,
     win_decimal: Any = None,
+    place_column: Optional[str] = None,
 ) -> Tuple[Optional[float], Optional[str]]:
     """Return (probability, source_label). Place target uses place odds only."""
     if target == "place":
         p = decimal_to_implied_prob(place_decimal)
-        return (p, "offered_place_decimal" if p is not None else None)
+        label = place_column or "place_decimal"
+        return (p, label if p is not None else None)
     p = decimal_to_implied_prob(win_decimal)
     if p is not None:
         return (p, "win_decimal")
