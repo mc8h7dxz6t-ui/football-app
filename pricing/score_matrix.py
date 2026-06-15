@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pricing.bivariate import lambdas_from_marginals, poisson_pmf, score_probability
 from pricing.dixon_coles import dixon_coles_tau
+from pricing.league_calibration import league_rho_for
 
 
 def institutional_mode_enabled() -> bool:
@@ -24,7 +25,7 @@ class PricingConfig:
     use_dixon_coles: bool = True
 
     @classmethod
-    def from_env(cls) -> "PricingConfig":
+    def from_env(cls, league_code: str = "") -> "PricingConfig":
         def _f(name: str, default: float) -> float:
             try:
                 return float(os.environ.get(name, str(default)))
@@ -39,10 +40,17 @@ class PricingConfig:
 
         biv = os.environ.get("FVE_BIVARIATE_POISSON", "1").strip().lower() not in ("0", "false", "no", "off")
         dc = os.environ.get("FVE_DIXON_COLES", "1").strip().lower() not in ("0", "false", "no", "off")
+        rho, _ = league_rho_for(league_code)
+        env_rho = os.environ.get("FVE_DIXON_COLES_RHO")
+        if env_rho and not league_code:
+            try:
+                rho = float(env_rho)
+            except ValueError:
+                pass
         return cls(
             max_goals=max(6, min(12, _i("FVE_SCORE_MATRIX_MAX_GOALS", 10))),
             shared_frac=max(0.0, min(0.45, _f("FVE_BIV_POISSON_SHARED_FRAC", 0.22))),
-            dixon_coles_rho=_f("FVE_DIXON_COLES_RHO", -0.13),
+            dixon_coles_rho=rho,
             use_bivariate=biv,
             use_dixon_coles=dc,
         )
@@ -137,32 +145,12 @@ def fit_lambdas_to_book_marginals(
     config: Optional[PricingConfig] = None,
     lam_h0: float = 1.35,
     lam_a0: float = 1.15,
+    league_code: str = "",
 ) -> Dict[str, Any]:
-    """Grid-search λ_h, λ_a so model marginals best match de-vigged book marginals."""
-    cfg = config or PricingConfig.from_env()
+    """MLE fit of (λ_h, λ_a) to de-vigged book marginals (Nelder–Mead)."""
+    from pricing.mle_fit import fit_lambdas_mle
+
+    cfg = config or PricingConfig.from_env(league_code)
     if not targets:
         return {"ok": False, "error": "no targets"}
-
-    best_err = float("inf")
-    best = (lam_h0, lam_a0)
-    for lam_h in [x * 0.1 for x in range(5, 61)]:  # 0.5 .. 6.0
-        for lam_a in [x * 0.1 for x in range(5, 61)]:
-            matrix = build_score_matrix(lam_h, lam_a, config=cfg)
-            err = _marginal_error(matrix, targets)
-            if err < best_err:
-                best_err = err
-                best = (lam_h, lam_a)
-
-    lam_h, lam_a = best
-    matrix = build_score_matrix(lam_h, lam_a, config=cfg)
-    model = derive_market_probs(matrix)
-    deltas = {k: round(model.get(k, 0.0) - targets.get(k, 0.0), 4) for k in targets}
-    return {
-        "ok": True,
-        "lam_h": round(lam_h, 3),
-        "lam_a": round(lam_a, 3),
-        "model_marginals": model,
-        "target_marginals": targets,
-        "deltas": deltas,
-        "rmse": round(best_err ** 0.5, 4),
-    }
+    return fit_lambdas_mle(targets, config=cfg, lam_h0=lam_h0, lam_a0=lam_a0)

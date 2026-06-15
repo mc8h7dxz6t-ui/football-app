@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from engine.book_consistency import cross_market_discrepancy
 from engine.devig import devig_1x2, overround
 from engine.fair_value import benchmark_vs_sharp
+from engine.portfolio_kelly import apply_portfolio_kelly_to_picks
 from model import edge, expected_goals, full_market_probs, goal_model, kelly, match_model
 from pipeline.cache import get_cache
 from pipeline.circuit_breaker import breakers
@@ -50,6 +51,9 @@ class ValueScanRequest(BaseModel):
     fixture_key: str
     home_stats: Dict[str, Any] = Field(default_factory=dict)
     away_stats: Dict[str, Any] = Field(default_factory=dict)
+    league_code: str = ""
+    ml_probs: Dict[str, float] = Field(default_factory=dict)
+    ml_blend_weight: float = Field(default_factory=lambda: float(os.environ.get("FVE_ML_BLEND_WEIGHT", "0.33")))
     min_edge_pct: float = 2.5
     bankroll: float = 1000.0
     kelly_fraction: float = 0.25
@@ -196,12 +200,21 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
     if not home_stats or not away_stats:
         raise HTTPException(404, "No team stats — ingest with fixture_id or pass home_stats/away_stats")
 
-    probs = {
-        **match_model(home_stats, away_stats, use_xg=req.use_xg),
-        **goal_model(home_stats, away_stats, use_xg=req.use_xg),
-    }
-    lam_h, lam_a = expected_goals(home_stats, away_stats, use_xg=req.use_xg)
-    book_xm = cross_market_discrepancy(shopped, model_lam_h=lam_h, model_lam_a=lam_a)
+    league = req.league_code or (cache.get_sports(req.fixture_key) or {}).get("league_name") or ""
+    ml_w = float(req.ml_blend_weight) if req.ml_probs else 0.0
+
+    probs = full_market_probs(
+        home_stats,
+        away_stats,
+        use_xg=req.use_xg,
+        league_code=str(league),
+        ml_probs=req.ml_probs or None,
+        ml_weight=ml_w,
+    )
+    lam_h, lam_a = expected_goals(home_stats, away_stats, use_xg=req.use_xg, league_code=str(league))
+    book_xm = cross_market_discrepancy(
+        shopped, model_lam_h=lam_h, model_lam_a=lam_a, league_code=str(league)
+    )
 
     picks: List[Dict[str, Any]] = []
     for sel, prob in probs.items():
@@ -241,12 +254,16 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
             }
         )
     picks.sort(key=lambda p: p["edge_pct"], reverse=True)
+    picks = apply_portfolio_kelly_to_picks(picks, bankroll=req.bankroll)
     return {
         "fixture_key": req.fixture_key,
         "picks": picks,
         "sharp_fair_probs": sharp_fair,
         "expected_goals": {"home": round(lam_h, 3), "away": round(lam_a, 3)},
+        "league_code": str(league),
+        "pricing_pipeline": "attack_defence" if os.environ.get("FVE_ATTACK_DEFENCE", "1") not in ("0", "false") else "venue_blend",
         "book_cross_market": book_xm,
+        "model_probs": {k: round(v, 4) for k, v in probs.items()},
     }
 
 

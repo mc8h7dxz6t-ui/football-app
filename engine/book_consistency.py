@@ -85,18 +85,20 @@ def cross_market_discrepancy(
     model_lam_a: float,
     min_gap_pct: float = 3.0,
     config: Optional[PricingConfig] = None,
+    league_code: str = "",
 ) -> Dict[str, Any]:
     """
     Compare book de-vigged marginals to a single coherent score matrix.
 
     Returns per-market gaps and synthetic arb hints (book rich vs matrix).
     """
-    cfg = config or PricingConfig.from_env()
+    cfg = config or PricingConfig.from_env(league_code)
+
     book = book_marginals_from_shopped(shopped)
     if not book:
         return {"ok": False, "error": "insufficient book lines", "book_marginals": {}}
 
-    fit = fit_lambdas_to_book_marginals(book, config=cfg, lam_h0=model_lam_h, lam_a0=model_lam_a)
+    fit = fit_lambdas_to_book_marginals(book, config=cfg, lam_h0=model_lam_h, lam_a0=model_lam_a, league_code=league_code)
     implied_lam_h = float(fit.get("lam_h") or model_lam_h)
     implied_lam_a = float(fit.get("lam_a") or model_lam_a)
     book_matrix = build_score_matrix(implied_lam_h, implied_lam_a, config=cfg)
@@ -143,6 +145,7 @@ def cross_market_discrepancy(
         "model_marginals": {k: round(v, 4) for k, v in model_probs.items()},
         "gaps_book_vs_coherent_pct": gaps,
         "implied_lambdas": {"lam_h": implied_lam_h, "lam_a": implied_lam_a},
+        "fit_method": fit.get("method"),
         "fit_rmse": fit.get("rmse"),
         "max_abs_gap_pct": round(max_gap, 3),
         "incoherent": max_gap >= min_gap_pct,

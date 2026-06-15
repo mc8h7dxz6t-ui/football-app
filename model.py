@@ -13,6 +13,8 @@ import math
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from pricing.attack_defence import attack_defence_enabled, expected_goals_from_ratings
+from pricing.ml_blend import blend_1x2_heads
 from pricing.score_matrix import PricingConfig, build_score_matrix, derive_market_probs, institutional_mode_enabled
 from pricing.time_decay import blend_decay_with_aggregate
 
@@ -120,9 +122,27 @@ def _time_decay_enabled() -> bool:
 
 
 def expected_goals(
-    home: Dict[str, Any], away: Dict[str, Any], *, use_xg: bool = True, alpha: float = XG_BLEND_ALPHA
+    home: Dict[str, Any],
+    away: Dict[str, Any],
+    *,
+    use_xg: bool = True,
+    alpha: float = XG_BLEND_ALPHA,
+    league_code: str = "",
 ) -> Tuple[float, float]:
-    """Expected goals (home, away) from venue-aware attack/defence blends + optional time decay."""
+    """Expected goals — attack/defence ratings (default) or legacy venue blend."""
+    if attack_defence_enabled() and institutional_mode_enabled():
+        hl = _time_decay_half_life()
+        lam_h, lam_a, _meta = expected_goals_from_ratings(
+            home,
+            away,
+            league_code=league_code,
+            use_xg=use_xg,
+            xg_alpha=alpha,
+            half_life_days=hl,
+            use_decay=_time_decay_enabled(),
+        )
+        return lam_h, lam_a
+
     rate_fn = (lambda t, v, k: blended_rate(t, v, k, alpha=alpha)) if use_xg else venue_rate
     hl = _time_decay_half_life()
     use_decay = _time_decay_enabled()
@@ -153,12 +173,18 @@ def _market_probs_from_lambdas(
     ea: float,
     *,
     max_goals: int = MAX_GOALS_GRID,
-    use_xg: bool = True,
+    league_code: str = "",
+    ml_probs: Optional[Dict[str, float]] = None,
+    ml_weight: float = 0.0,
 ) -> Dict[str, float]:
     if institutional_mode_enabled():
-        cfg = PricingConfig.from_env()
+        cfg = PricingConfig.from_env(league_code)
         matrix = build_score_matrix(eh, ea, config=cfg)
-        return derive_market_probs(matrix)
+        base = derive_market_probs(matrix)
+        if ml_probs and ml_weight > 0:
+            blended, _dbg = blend_1x2_heads(base, ml_probs, ml_weight=ml_weight)
+            return blended
+        return base
 
     ph, pa = _score_grid_independent(eh, ea, max_goals)
     home_p = draw_p = away_p = 0.0
@@ -188,29 +214,51 @@ def _market_probs_from_lambdas(
 
 
 def match_model(
-    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+    home: Dict[str, Any],
+    away: Dict[str, Any],
+    *,
+    max_goals: int = MAX_GOALS_GRID,
+    use_xg: bool = True,
+    league_code: str = "",
+    ml_probs: Optional[Dict[str, float]] = None,
+    ml_weight: float = 0.0,
 ) -> Dict[str, float]:
     """1X2 probabilities from joint score matrix (institutional) or independent Poisson."""
-    eh, ea = expected_goals(home, away, use_xg=use_xg)
-    probs = _market_probs_from_lambdas(eh, ea, max_goals=max_goals, use_xg=use_xg)
+    eh, ea = expected_goals(home, away, use_xg=use_xg, league_code=league_code)
+    probs = _market_probs_from_lambdas(
+        eh, ea, max_goals=max_goals, league_code=league_code, ml_probs=ml_probs, ml_weight=ml_weight
+    )
     return {"Home": probs["Home"], "Draw": probs["Draw"], "Away": probs["Away"]}
 
 
 def goal_model(
-    home: Dict[str, Any], away: Dict[str, Any], *, max_goals: int = MAX_GOALS_GRID, use_xg: bool = True
+    home: Dict[str, Any],
+    away: Dict[str, Any],
+    *,
+    max_goals: int = MAX_GOALS_GRID,
+    use_xg: bool = True,
+    league_code: str = "",
 ) -> Dict[str, float]:
     """Over 2.5 and BTTS from the same score matrix as 1X2."""
-    eh, ea = expected_goals(home, away, use_xg=use_xg)
-    probs = _market_probs_from_lambdas(eh, ea, max_goals=max_goals, use_xg=use_xg)
+    eh, ea = expected_goals(home, away, use_xg=use_xg, league_code=league_code)
+    probs = _market_probs_from_lambdas(eh, ea, max_goals=max_goals, league_code=league_code)
     return {"Over2.5": probs["Over2.5"], "BTTS": probs["BTTS"]}
 
 
 def full_market_probs(
-    home: Dict[str, Any], away: Dict[str, Any], *, use_xg: bool = True
+    home: Dict[str, Any],
+    away: Dict[str, Any],
+    *,
+    use_xg: bool = True,
+    league_code: str = "",
+    ml_probs: Optional[Dict[str, float]] = None,
+    ml_weight: float = 0.0,
 ) -> Dict[str, float]:
     """All derivative markets from one λ pair — for cross-market checks."""
-    eh, ea = expected_goals(home, away, use_xg=use_xg)
-    return _market_probs_from_lambdas(eh, ea, use_xg=use_xg)
+    eh, ea = expected_goals(home, away, use_xg=use_xg, league_code=league_code)
+    return _market_probs_from_lambdas(
+        eh, ea, league_code=league_code, ml_probs=ml_probs, ml_weight=ml_weight
+    )
 
 
 def extract_best(odds_json: Dict[str, Any], *, event_label: str = "") -> Dict[str, Dict[str, Any]]:
