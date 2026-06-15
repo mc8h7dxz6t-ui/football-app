@@ -12,6 +12,15 @@ log() { echo "[hibs-fve-lines] $*"; }
 
 [[ -d "${APP}/src/hibs_predictor" ]] || { echo "ERROR: ${APP} not found" >&2; exit 1; }
 
+if [[ -x "${APP}/scripts/vps_ensure_hibs_bet_venv.sh" ]]; then
+  bash "${APP}/scripts/vps_ensure_hibs_bet_venv.sh"
+elif [[ -f "${APP}/../football-app/scripts/vps_ensure_hibs_bet_venv.sh" ]]; then
+  bash "${APP}/../football-app/scripts/vps_ensure_hibs_bet_venv.sh"
+else
+  ENSURE_RAW="${HIBS_FVE_LINES_ENSURE_RAW:-https://raw.githubusercontent.com/mc8h7dxz6t-ui/football-app/${BRANCH}/scripts/vps_ensure_hibs_bet_venv.sh}"
+  curl -fsSL "${ENSURE_RAW}" | bash
+fi
+
 dest="${APP}/src/hibs_predictor/fve_lines_proxy.py"
 static_dest="${APP}/static/fve_ws_lines.js"
 mkdir -p "$(dirname "${dest}")" "$(dirname "${static_dest}")"
@@ -52,6 +61,13 @@ if ! grep -q '^FVE_LINES_TOKEN=' "${APP}/.env" 2>/dev/null; then
 fi
 
 systemctl restart hibs-bet 2>/dev/null || true
+if systemctl is-active hibs-bet >/dev/null 2>&1; then
+  sleep 2
+  if ! curl -fsS --max-time 8 "http://127.0.0.1:8000/api/ping" >/dev/null 2>&1; then
+    log "WARN hibs-bet ping failed — try: journalctl -u hibs-bet -n 30"
+    journalctl -u hibs-bet -n 10 --no-pager 2>/dev/null || true
+  fi
+fi
 log "done — FVE can set:"
 echo "  FVE_UPSTREAM_MODE=hibs"
 echo "  HIBS_UPSTREAM_BASE_URL=https://hibs-bet.co.uk"
