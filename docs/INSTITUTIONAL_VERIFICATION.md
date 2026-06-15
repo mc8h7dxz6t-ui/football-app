@@ -107,6 +107,23 @@ HIBS_RACING_FEATURE_STORE=/opt/hibs-racing/data/feature_store.sqlite \
 
 If the feature_store flock cannot be acquired within `RACING_FEATURE_STORE_LOCK_WAIT_SEC` (default 60), verification settlement exits **0** with `run_outcome: feature_store_busy` (metrics preserved).
 
+### Schema migrations (replaces runtime `ALTER TABLE`)
+
+Settlement no longer runs ad-hoc DDL. Migrations are versioned in `metrics/feature_store_migrations.py` with a ledger table:
+
+| Component | Detail |
+|-----------|--------|
+| Ledger | `schema_migrations(version, name, checksum, applied_at)` |
+| Head | `001_settlement_columns` — `finish_position` + model score column |
+| Apply | One `BEGIN IMMEDIATE` per migration; failure rolls back ledger insert |
+| Drift guard | Re-applied checksum must match registry or `MigrationDriftError` |
+| Ops CLI | `python scripts/migrate_feature_store.py --feature-store …` |
+| Rollback | Forward-only (SQLite); restore backup or ship `002+` corrective migration |
+
+`_prepare_writer()` calls `apply_feature_store_migrations()` before settlement `BEGIN IMMEDIATE`, so schema changes are **outside** the per-batch data transaction.
+
+See `migrations/feature_store/README.md`.
+
 ### flock skip vs successful run (`automation_state.json`)
 
 Concurrent runs use non-blocking flock. A skip exits **0** (benign for cron) but must **not** be treated as a fresh verification.

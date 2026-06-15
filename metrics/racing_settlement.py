@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from metrics.feature_store_lock import feature_store_lock, lock_wait_enabled
+from metrics.feature_store_migrations import apply_feature_store_migrations
 from metrics.racing_sqlite import (
     MODEL_PROB_COLS,
     PLACE_POSITIONS_COLS,
@@ -30,12 +31,6 @@ class SettlementResult:
     rows_updated: int
     rows_missing: int
     table: str
-
-
-def _ensure_column(con: sqlite3.Connection, table: str, col: str, ddl_type: str = "INTEGER") -> None:
-    cols = {c.lower() for c in _columns(con, table)}
-    if col.lower() not in cols:
-        con.execute(f"ALTER TABLE [{table}] ADD COLUMN [{col}] {ddl_type}")
 
 
 def resolve_writer_columns(con: sqlite3.Connection, table: str) -> Dict[str, Optional[str]]:
@@ -64,16 +59,12 @@ def _prepare_writer(
     table: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Optional[str]]]:
     src = _choose_source_table(con, table=table)
+    apply_feature_store_migrations(con, src)
     wcols = resolve_writer_columns(con, src)
     race_col = wcols["race_id"]
     runner_col = wcols["runner_id"]
-    pos_col = wcols["position"]
-    score_col = wcols["score"]
     if not race_col or not runner_col:
         raise ValueError(f"{src} missing race_id/runner_id columns")
-    _ensure_column(con, src, pos_col, "INTEGER")
-    if score_col:
-        _ensure_column(con, src, score_col, "REAL")
     return src, wcols
 
 
