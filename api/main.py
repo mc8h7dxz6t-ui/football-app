@@ -72,8 +72,10 @@ def health() -> Dict[str, Any]:
 
     cache = get_cache()
     risk = RiskConfig()
+    paused = os.environ.get("FVE_PAUSED", "0").strip().lower() in ("1", "true", "yes", "on")
     return {
         "status": "ok",
+        "paused": paused,
         "cache_backend": cache.backend,
         "line_bus": get_line_bus().backend,
         "wire_codec": codec_name(),

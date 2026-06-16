@@ -52,7 +52,7 @@ upsert FEED_POLL_SEC_MATCHBOOK 0.5
 log "updated ${ENV_FILE}"
 
 log "6/7 — cron: hibs lines collector every 5 min"
-CRON_LINE="*/5 * * * * cd ${FVE_ROOT} && HIBS_UPSTREAM_BASE_URL=${HIBS_URL} FVE_SCRAPE_LINES_DIR=${SCRAPE_DIR} /usr/bin/python3 scripts/fve_hibs_lines_collector.py --from-watchlist >> /var/log/fve/lines-collector.log 2>&1"
+CRON_LINE="*/5 * * * * cd ${FVE_ROOT} && HIBS_UPSTREAM_BASE_URL=${HIBS_URL} FVE_SCRAPE_LINES_DIR=${SCRAPE_DIR} ${HIBS_UPSTREAM_TOKEN:+HIBS_UPSTREAM_TOKEN=${HIBS_UPSTREAM_TOKEN}} /usr/bin/python3 scripts/fve_hibs_lines_collector.py --from-watchlist >> /var/log/fve/lines-collector.log 2>&1"
 mkdir -p /var/log/fve
 touch /var/log/fve/lines-collector.log
 ( crontab -l 2>/dev/null | grep -v 'fve_hibs_lines_collector' || true; echo "${CRON_LINE}" ) | crontab -
@@ -68,7 +68,7 @@ elif [[ -f "${FVE_ROOT}/../football-app/scripts/fve_hibs_lines_collector.py" ]];
 fi
 
 if [[ -f "${FVE_ROOT}/docker-compose.yml" ]]; then
-  (cd "${FVE_ROOT}" && docker compose up -d --build api worker redis)
+  (cd "${FVE_ROOT}" && COMPOSE_PROFILES=ingest docker compose up -d --build api worker redis)
 elif systemctl is-active fve-api >/dev/null 2>&1; then
   systemctl restart fve-api fve-worker 2>/dev/null || systemctl restart fve-api
 else
