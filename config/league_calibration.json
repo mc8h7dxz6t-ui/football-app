@@ -1,0 +1,14 @@
+{
+  "default_rho": -0.10,
+  "default_goals_per_team": 1.35,
+  "default_home_advantage": 1.08,
+  "leagues": {
+    "ENGLAND_PREMIER_LEAGUE": {"rho": -0.12, "goals_per_team": 1.38, "home_advantage": 1.10},
+    "ENGLAND_CHAMPIONSHIP": {"rho": -0.11, "goals_per_team": 1.32, "home_advantage": 1.09},
+    "SPAIN_LA_LIGA": {"rho": -0.10, "goals_per_team": 1.28, "home_advantage": 1.12},
+    "GERMANY_BUNDESLIGA": {"rho": -0.09, "goals_per_team": 1.45, "home_advantage": 1.07},
+    "ITALY_SERIE_A": {"rho": -0.11, "goals_per_team": 1.30, "home_advantage": 1.10},
+    "FRANCE_LIGUE_1": {"rho": -0.10, "goals_per_team": 1.33, "home_advantage": 1.10},
+    "SCOTLAND_PREMIERSHIP": {"rho": -0.13, "goals_per_team": 1.40, "home_advantage": 1.11}
+  }
+}
