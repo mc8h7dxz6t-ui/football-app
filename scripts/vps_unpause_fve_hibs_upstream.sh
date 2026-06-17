@@ -47,7 +47,7 @@ log "updated ${ENV_FILE}"
 
 log "4/4 — restart FVE stack (if present)"
 if [[ -f "${FVE_ROOT}/docker-compose.yml" ]]; then
-  (cd "${FVE_ROOT}" && docker compose up -d --build api worker redis)
+  (cd "${FVE_ROOT}" && COMPOSE_PROFILES=ingest docker compose up -d --build api worker redis)
 elif systemctl is-active fve-api >/dev/null 2>&1; then
   systemctl restart fve-api fve-worker 2>/dev/null || systemctl restart fve-api
 else
