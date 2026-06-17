@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from engine.book_consistency import cross_market_discrepancy
@@ -105,7 +105,44 @@ def health() -> Dict[str, Any]:
         health["backtest_slice"] = backtest_health_slice()
     except Exception:
         health["backtest_slice"] = {"available": False}
+    try:
+        from inplay.evidence import inplay_evidence_gates
+
+        ie = inplay_evidence_gates()
+        health["inplay_evidence"] = {
+            "buyer_ready": ie.get("buyer_ready"),
+            "evidence_grade": ie.get("evidence_grade"),
+            "buyer_readiness_score": ie.get("buyer_readiness_score"),
+            "gates_pass": sum(1 for g in ie.get("gates", []) if g.get("pass")),
+            "gates_total": len(ie.get("gates", [])),
+        }
+    except Exception:
+        health["inplay_evidence"] = {"buyer_ready": False}
     return health
+
+
+@app.get("/api/inplay/evidence")
+def inplay_evidence() -> Dict[str, Any]:
+    from inplay.evidence import inplay_evidence_gates
+
+    return inplay_evidence_gates()
+
+
+@app.get("/api/inplay/marks/{fixture_id}")
+def inplay_marks(fixture_id: int) -> Dict[str, Any]:
+    from inplay.router import fetch_exchange_marks
+
+    return fetch_exchange_marks(fixture_id)
+
+
+@app.post("/api/inplay/feed/{vendor}/binary")
+async def inplay_feed_binary(vendor: str, request: Request) -> Dict[str, Any]:
+    from inplay.feeds_binary import ingest_binary_payload
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty payload")
+    return ingest_binary_payload(vendor, body)
 
 
 @app.websocket("/ws/lines/{fixture_key}")
