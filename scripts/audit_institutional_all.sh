@@ -62,6 +62,15 @@ else
   warn "hibs-bet not in workspace — skip racing evidence"
 fi
 
+section "In-play evidence gates"
+if [[ -x "${HIBS_ROOT}/scripts/verify_inplay_evidence_gates.sh" ]]; then
+  "${HIBS_ROOT}/scripts/verify_inplay_evidence_gates.sh" || FAIL=1
+elif [[ -d "${HIBS_ROOT}/scripts" ]]; then
+  warn "verify_inplay_evidence_gates.sh not found"
+else
+  warn "hibs-bet not in workspace — skip inplay evidence"
+fi
+
 section "FVE scrape stack"
 if [[ -x "${ROOT}/scripts/vps_unpause_fve_scrape_stack.sh" ]]; then
   if curl -sf "${FVE_API}/health" -o /tmp/fve_scrape_check.json 2>/dev/null; then

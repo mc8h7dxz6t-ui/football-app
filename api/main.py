@@ -116,8 +116,11 @@ def health() -> Dict[str, Any]:
             "gates_pass": sum(1 for g in ie.get("gates", []) if g.get("pass")),
             "gates_total": len(ie.get("gates", [])),
         }
-    except Exception:
-        health["inplay_evidence"] = {"buyer_ready": False}
+    except Exception as exc:
+        health["inplay_evidence"] = {
+            "buyer_ready": False,
+            "error": str(exc)[:120],
+        }
     return health
 
 
