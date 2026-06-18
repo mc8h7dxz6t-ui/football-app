@@ -31,6 +31,13 @@ for src in ("matchbook", "odds_api", "api_football"):
         print(f"FAIL budget exhausted: {src}")
         sys.exit(1)
 print(f"cache={h.get('cache_backend')} bus={h.get('line_bus')}")
+ie = h.get("inplay_evidence") or {}
+if not ie:
+    print("WARN inplay_evidence missing from /health")
+elif ie.get("gates_total") is None and ie.get("evidence_grade") is None:
+    print(f"WARN inplay_evidence incomplete: {ie.get('error', 'no detail')}")
+else:
+    print(f"inplay_evidence grade={ie.get('evidence_grade')} buyer_ready={ie.get('buyer_ready')}")
 PY
   [[ $? -eq 0 ]] || FAIL=1
 fi
