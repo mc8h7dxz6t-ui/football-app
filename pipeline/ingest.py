@@ -11,7 +11,7 @@ from engine.devig import devig_1x2
 from feeds.base import FeedAdapter
 from feeds.hibs_upstream_feed import HibsUpstreamFeed
 from feeds.registry import FeedRegistry, build_default_registry
-from feeds.scrape_mode import scrape_watchlist_enabled
+from feeds.scrape_mode import scrape_mode_enabled, scrape_watchlist_enabled
 from pipeline.feed_sports import sports_from_registry
 from pipeline.worker_status import touch_worker_heartbeat
 from odds_shopping import shop_lines
