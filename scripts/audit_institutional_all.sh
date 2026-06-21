@@ -62,6 +62,34 @@ else
   warn "hibs-bet not in workspace — skip racing evidence"
 fi
 
+section "FVE prematch paper ledger"
+if curl -sf "${FVE_API}/health" -o /tmp/fve_audit_health.json 2>/dev/null; then
+  python3 - <<'PY'
+import json, sys
+h = json.load(open("/tmp/fve_audit_health.json"))
+paper = h.get("paper") or {}
+pe = h.get("prematch_evidence") or {}
+n = paper.get("with_verification_hash") or paper.get("n_rows") or 0
+print(f"  paper_n={n} recon_clean={paper.get('recon_clean')} grade={pe.get('evidence_grade')}")
+if paper.get("enabled") is False and paper.get("error"):
+    print(f"  WARN paper ledger: {paper.get('error')}")
+elif int(n or 0) < 25:
+    print("  WARN prematch paper n<25 — enable FVE_PAPER_LEDGER=1 and run value-scan")
+PY
+  ok "FVE paper health slice present"
+else
+  warn "FVE health unavailable for paper check"
+fi
+
+section "FVE prematch evidence gates"
+if [[ -x "${HIBS_ROOT}/scripts/verify_fve_evidence_gates.sh" ]]; then
+  FVE_API_URL="${FVE_API}" "${HIBS_ROOT}/scripts/verify_fve_evidence_gates.sh" || FAIL=1
+elif [[ -d "${HIBS_ROOT}/scripts" ]]; then
+  warn "verify_fve_evidence_gates.sh not found"
+else
+  warn "hibs-bet not in workspace — skip FVE prematch evidence"
+fi
+
 section "In-play evidence gates"
 if [[ -x "${HIBS_ROOT}/scripts/verify_inplay_evidence_gates.sh" ]]; then
   "${HIBS_ROOT}/scripts/verify_inplay_evidence_gates.sh" || FAIL=1

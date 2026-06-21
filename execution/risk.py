@@ -71,6 +71,12 @@ class RiskConfig:
 
     def status(self) -> Dict[str, object]:
         self._roll_day()
+        exec_disabled = os.environ.get("EXECUTION_DISABLED", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         return {
             "live_enabled": self.live_enabled(),
             "auto_trade": self.auto_trade,
@@ -80,6 +86,13 @@ class RiskConfig:
             "min_profit_pct": self.min_profit_pct,
             "daily_trades": self._daily_trades,
             "daily_outlay_gbp": self._daily_outlay,
+            "mode": "analytics",
+            "execution_disabled": exec_disabled,
+            "sub_100ms_exchange": False,
+            "co_location": False,
+            "institutional_note": (
+                "Sub-100ms exchange execution not in analytics license (EXECUTION_DISABLED)."
+            ),
         }
 
 
