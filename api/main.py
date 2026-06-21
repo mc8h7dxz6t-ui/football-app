@@ -137,6 +137,14 @@ def health() -> Dict[str, Any]:
         }
     except Exception as exc:
         health["paper"] = {"enabled": False, "error": str(exc)[:120]}
+    try:
+        from engine.institutional_disclosure import institutional_disclosure
+        from inplay.depth import depth_health_slice
+
+        health["institutional_disclosure"] = institutional_disclosure()
+        health["inplay_depth"] = depth_health_slice()
+    except Exception as exc:
+        health["institutional_disclosure"] = {"error": str(exc)[:120]}
     return health
 
 
@@ -175,6 +183,20 @@ def inplay_marks(fixture_id: int) -> Dict[str, Any]:
     from inplay.router import fetch_exchange_marks
 
     return fetch_exchange_marks(fixture_id)
+
+
+@app.get("/api/inplay/depth/{fixture_id}")
+def inplay_depth(fixture_id: int) -> Dict[str, Any]:
+    from inplay.depth import exchange_depth_snapshot
+
+    return exchange_depth_snapshot(fixture_id)
+
+
+@app.get("/api/institutional/disclosure")
+def institutional_disclosure_endpoint() -> Dict[str, Any]:
+    from engine.institutional_disclosure import institutional_disclosure
+
+    return institutional_disclosure()
 
 
 @app.post("/api/inplay/feed/{vendor}/binary")

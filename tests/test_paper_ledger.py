@@ -64,7 +64,9 @@ def test_settle_and_clv(paper_db):
             "f1": {
                 "home_goals": 2,
                 "away_goals": 1,
-                "closing_odds": {"home": 2.3},
+                "closing": {
+                    "pinnacle_1x2": {"home": 2.3, "draw": 3.4, "away": 3.8},
+                },
             }
         }
     )
@@ -72,6 +74,7 @@ def test_settle_and_clv(paper_db):
     health = ledger_health_slice()
     assert health["settled"] == 1
     assert health["clv_n"] == 1
+    assert health.get("clv_pinnacle_n") == 1
 
 
 def test_prematch_evidence_gates_structure(paper_db, monkeypatch):

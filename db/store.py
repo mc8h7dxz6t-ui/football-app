@@ -33,6 +33,22 @@ def _ensure_engine():
     from db.models import Base
 
     Base.metadata.create_all(_engine)
+    _migrate_paper_picks(_engine)
+
+
+def _migrate_paper_picks(engine) -> None:
+    """SQLite-safe add columns for CLV benchmark tier (idempotent)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "paper_picks" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("paper_picks")}
+    with engine.begin() as conn:
+        if "clv_benchmark_tier" not in cols:
+            conn.execute(text("ALTER TABLE paper_picks ADD COLUMN clv_benchmark_tier VARCHAR(32)"))
+        if "clv_benchmark_source" not in cols:
+            conn.execute(text("ALTER TABLE paper_picks ADD COLUMN clv_benchmark_source VARCHAR(64)"))
 
 
 def persist_snapshot(fixture_key: str, payload: Dict[str, Any]) -> None:

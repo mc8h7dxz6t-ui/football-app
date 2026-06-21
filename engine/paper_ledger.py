@@ -162,6 +162,11 @@ def ledger_stats() -> Dict[str, Any]:
         with_hash = sum(1 for r in rows if r.verification_hash)
         clv_beat = sum(1 for r in rows if r.clv_beat is True)
         clv_n = sum(1 for r in rows if r.clv_beat is not None)
+        tier_counts: Dict[str, int] = {}
+        for r in rows:
+            if r.clv_benchmark_tier:
+                tier_counts[r.clv_benchmark_tier] = tier_counts.get(r.clv_benchmark_tier, 0) + 1
+        pinnacle_n = tier_counts.get("pinnacle", 0)
         return {
             "n_rows": len(rows),
             "open": open_n,
@@ -170,6 +175,9 @@ def ledger_stats() -> Dict[str, Any]:
             "clv_beat_n": clv_beat,
             "clv_n": clv_n,
             "clv_beat_pct": round(100.0 * clv_beat / clv_n, 1) if clv_n else None,
+            "clv_benchmark_tiers": tier_counts,
+            "clv_pinnacle_n": pinnacle_n,
+            "clv_pinnacle_pct": round(100.0 * pinnacle_n / clv_n, 1) if clv_n else None,
         }
     finally:
         session.close()
@@ -190,14 +198,32 @@ def ledger_health_slice() -> Dict[str, Any]:
         "recon_clean": is_clean,
         "clv_beat_pct": stats.get("clv_beat_pct"),
         "clv_n": stats.get("clv_n"),
+        "clv_benchmark_tiers": stats.get("clv_benchmark_tiers"),
+        "clv_pinnacle_n": stats.get("clv_pinnacle_n"),
+        "clv_pinnacle_pct": stats.get("clv_pinnacle_pct"),
     }
 
 
 def settle_open_picks(*, results: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Settle open picks when results map provided:
-      results[fixture_key] = {"home_goals": int, "away_goals": int, "closing_odds": {market: float}}
+      results[fixture_key] = {
+        "home_goals": int, "away_goals": int,
+        "closing_odds": {market: float},  # legacy
+        "closing": {
+          "pinnacle_1x2": {"home":..,"draw":..,"away":..},
+          "exchange_1x2": {...},
+          "api_football_1x2": {...},
+          "all_bookmaker_odds": [...],
+        },
+      }
     """
+    from engine.clv_benchmark import (
+        parse_exchange_1x2_from_panel,
+        parse_pinnacle_1x2_from_panel,
+        resolve_clv_closing,
+    )
+
     _ensure_db()
     from db.models import PaperPick
     from db.store import _Session
@@ -220,7 +246,23 @@ def settle_open_picks(*, results: Optional[Dict[str, Dict[str, Any]]] = None) ->
             else:
                 outcome = "draw"
             won = row.market.lower() == outcome
-            closing = (res.get("closing_odds") or {}).get(row.market)
+            closing_block = res.get("closing") if isinstance(res.get("closing"), dict) else {}
+            panel = closing_block.get("all_bookmaker_odds") or res.get("all_bookmaker_odds")
+            pinnacle_1x2 = closing_block.get("pinnacle_1x2") or (
+                parse_pinnacle_1x2_from_panel(panel) if panel else None
+            )
+            exchange_1x2 = closing_block.get("exchange_1x2") or (
+                parse_exchange_1x2_from_panel(panel) if panel else None
+            )
+            api_football_1x2 = closing_block.get("api_football_1x2") or closing_block.get("1x2")
+            legacy = (res.get("closing_odds") or {}).get(row.market)
+            closing, tier, source = resolve_clv_closing(
+                row.market,
+                pinnacle_1x2=pinnacle_1x2,
+                exchange_1x2=exchange_1x2,
+                api_football_1x2=api_football_1x2,
+                legacy_market_odds=legacy,
+            )
             clv_beat = None
             if closing and float(closing) > 1:
                 clv_beat = float(row.odds) >= float(closing)
@@ -231,6 +273,8 @@ def settle_open_picks(*, results: Optional[Dict[str, Dict[str, Any]]] = None) ->
             row.pnl = round(pnl, 4)
             row.closing_odds = closing
             row.clv_beat = clv_beat
+            row.clv_benchmark_tier = tier
+            row.clv_benchmark_source = source
             row.settled_at = time.time()
             settled += 1
         session.commit()
@@ -264,6 +308,8 @@ def export_csv(*, days: int = 90) -> str:
             "pnl",
             "closing_odds",
             "clv_beat",
+            "clv_benchmark_tier",
+            "clv_benchmark_source",
             "created_at",
         ]
     )
@@ -291,6 +337,8 @@ def export_csv(*, days: int = 90) -> str:
                     r.pnl,
                     r.closing_odds,
                     r.clv_beat,
+                    r.clv_benchmark_tier,
+                    r.clv_benchmark_source,
                     r.created_at,
                 ]
             )
@@ -315,6 +363,8 @@ def prematch_evidence_gates() -> Dict[str, Any]:
     clv_n = int(stats.get("clv_n") or 0)
     clv_pct = stats.get("clv_beat_pct")
     v14 = clv_n >= MIN_PAPER_ROWS and clv_pct is not None and float(clv_pct) >= CLV_BEAT_PASS_PCT
+    pin_pct = stats.get("clv_pinnacle_pct")
+    v15 = True  # informational — Pinnacle-tier coverage disclosure
 
     gates = [
         {
@@ -356,6 +406,20 @@ def prematch_evidence_gates() -> Dict[str, Any]:
             "pass": v14,
             "actual": {"n": clv_n, "beat_pct": clv_pct},
             "threshold": f"n>={MIN_PAPER_ROWS}, beat>={CLV_BEAT_PASS_PCT}%",
+            "critical": False,
+            "n": clv_n,
+        },
+        {
+            "id": "V15_clv_benchmark",
+            "label": "CLV benchmark tier disclosure",
+            "pass": v15,
+            "actual": {
+                "tiers": stats.get("clv_benchmark_tiers"),
+                "pinnacle_pct": pin_pct,
+                "ladder": ["pinnacle", "exchange", "sharp_synthetic", "api_football"],
+            },
+            "threshold": "informational — Pinnacle close preferred",
+            "message": "API-Football close is not equivalent to Pinnacle institutional benchmark.",
             "critical": False,
             "n": clv_n,
         },

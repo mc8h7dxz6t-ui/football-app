@@ -38,6 +38,8 @@ class PaperPick(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     closing_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
     clv_beat: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    clv_benchmark_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    clv_benchmark_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     meta_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[float] = mapped_column(Float, index=True)
     updated_at: Mapped[float] = mapped_column(Float)
