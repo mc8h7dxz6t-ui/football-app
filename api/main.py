@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -121,7 +123,44 @@ def health() -> Dict[str, Any]:
             "buyer_ready": False,
             "error": str(exc)[:120],
         }
+    try:
+        from engine.paper_ledger import ledger_health_slice, prematch_evidence_gates
+
+        health["paper"] = ledger_health_slice()
+        pe = prematch_evidence_gates()
+        health["prematch_evidence"] = {
+            "buyer_ready": pe.get("buyer_ready"),
+            "evidence_grade": pe.get("evidence_grade"),
+            "buyer_readiness_score": pe.get("buyer_readiness_score"),
+            "gates_pass": sum(1 for g in pe.get("gates", []) if g.get("pass")),
+            "gates_total": len(pe.get("gates", [])),
+        }
+    except Exception as exc:
+        health["paper"] = {"enabled": False, "error": str(exc)[:120]}
     return health
+
+
+@app.get("/api/evidence/prematch")
+def prematch_evidence() -> Dict[str, Any]:
+    from engine.paper_ledger import prematch_evidence_gates
+
+    return prematch_evidence_gates()
+
+
+@app.get("/api/paper/export.csv")
+def paper_export_csv(days: int = 90) -> Any:
+    from engine.paper_ledger import export_csv
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(export_csv(days=days), media_type="text/csv")
+
+
+@app.post("/api/paper/settle")
+def paper_settle(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from engine.paper_ledger import settle_open_picks
+
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else payload
+    return settle_open_picks(results=results)
 
 
 @app.get("/api/inplay/evidence")
@@ -290,6 +329,7 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         xm_hint = next((h for h in book_xm.get("synthetic_hints", []) if h.get("market") == sel), None)
         picks.append(
             {
+                "pick_id": str(uuid.uuid4()),
                 "market": sel,
                 "odds": odds,
                 "bookmaker": quote.get("bookmaker"),
@@ -304,6 +344,32 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         )
     picks.sort(key=lambda p: p["edge_pct"], reverse=True)
     picks = apply_portfolio_kelly_to_picks(picks, bankroll=req.bankroll)
+    scan_meta = {
+        "league_code": str(league),
+        "pricing_pipeline": "attack_defence"
+        if os.environ.get("FVE_ATTACK_DEFENCE", "1") not in ("0", "false")
+        else "venue_blend",
+        "min_edge_pct": req.min_edge_pct,
+    }
+    ledger_result = None
+    try:
+        from engine.paper_ledger import ledger_enabled, pick_verification_hash, record_value_picks
+
+        if ledger_enabled():
+            for p in picks:
+                ts = str(int(time.time()))
+                p["verification_hash"] = pick_verification_hash(
+                    p["pick_id"],
+                    ts,
+                    req.fixture_key,
+                    p["market"],
+                    float(p["odds"]),
+                    float(p["stake"]),
+                )
+            ledger_result = record_value_picks(req.fixture_key, picks, scan_meta=scan_meta)
+    except Exception:
+        ledger_result = {"error": "ledger_record_failed"}
+
     return {
         "fixture_key": req.fixture_key,
         "picks": picks,
@@ -313,6 +379,7 @@ def value_scan(req: ValueScanRequest) -> Dict[str, Any]:
         "pricing_pipeline": "attack_defence" if os.environ.get("FVE_ATTACK_DEFENCE", "1") not in ("0", "false") else "venue_blend",
         "book_cross_market": book_xm,
         "model_probs": {k: round(v, 4) for k, v in probs.items()},
+        "paper_ledger": ledger_result,
     }
 
 

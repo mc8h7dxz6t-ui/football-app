@@ -38,6 +38,15 @@ elif ie.get("gates_total") is None and ie.get("evidence_grade") is None:
     print(f"WARN inplay_evidence incomplete: {ie.get('error', 'no detail')}")
 else:
     print(f"inplay_evidence grade={ie.get('evidence_grade')} buyer_ready={ie.get('buyer_ready')}")
+paper = h.get("paper") or {}
+pe = h.get("prematch_evidence") or {}
+if paper.get("enabled") is False and not paper.get("n_rows"):
+    print("WARN prematch paper ledger disabled or empty")
+else:
+    print(
+        f"prematch_paper n={paper.get('with_verification_hash') or paper.get('n_rows')} "
+        f"recon={paper.get('recon_clean')} grade={pe.get('evidence_grade')}"
+    )
 PY
   [[ $? -eq 0 ]] || FAIL=1
 fi
