@@ -103,6 +103,88 @@ def discover_matchbook_only() -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
     return keys, contexts
 
 
+def discover_from_hibs_upstream() -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Discover fixtures from hibs-bet /api/fve/fixtures (scrape-first VPS)."""
+    base = (os.environ.get("HIBS_UPSTREAM_BASE_URL") or "").strip()
+    if not base:
+        return [], {}
+    token = (os.environ.get("HIBS_UPSTREAM_TOKEN") or os.environ.get("FVE_LINES_TOKEN") or "").strip()
+    url = f"{base.rstrip('/')}/api/fve/fixtures"
+    headers = {"User-Agent": "fve-watchlist/1.0", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("hibs upstream fixtures fetch failed: %s", exc)
+        return [], {}
+    if not isinstance(payload, dict):
+        return [], {}
+    rows = payload.get("fixtures") or []
+    keys: List[str] = []
+    contexts: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fk = str(row.get("fixture_key") or "").strip()
+        if not fk or fk in contexts:
+            continue
+        ctx: Dict[str, Any] = {
+            "event_label": fk,
+            "home_team": row.get("home_team"),
+            "away_team": row.get("away_team"),
+            "kickoff_iso": row.get("kickoff_iso"),
+            "league": row.get("league"),
+            "source": "hibs_upstream",
+        }
+        keys.append(fk)
+        contexts[fk] = ctx
+    if keys:
+        log.info("watchlist hibs upstream discovered %d fixtures (source=%s)", len(keys), payload.get("source"))
+    return keys, contexts
+
+
+def discover_from_scrape_lines_dir() -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Build watchlist from JSON files written by fve_hibs_lines_collector."""
+    raw = (os.environ.get("FVE_SCRAPE_LINES_DIR") or "").strip()
+    if not raw:
+        return [], {}
+    root = Path(raw)
+    if not root.is_dir():
+        return [], {}
+    keys: List[str] = []
+    contexts: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(root.glob("*.json")):
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(blob, dict):
+            continue
+        fk = str(blob.get("fixture_key") or "").strip()
+        if not fk:
+            stem = path.stem.replace("_", " ")
+            if " v " in stem:
+                fk = stem
+        if not fk or fk in contexts:
+            continue
+        ctx: Dict[str, Any] = {
+            "event_label": fk,
+            "home_team": blob.get("home_team"),
+            "away_team": blob.get("away_team"),
+            "kickoff_iso": blob.get("kickoff_iso"),
+            "league": blob.get("league"),
+            "source": "scrape_lines_dir",
+        }
+        keys.append(fk)
+        contexts[fk] = ctx
+    if keys:
+        log.info("watchlist scrape-lines dir discovered %d fixtures", len(keys))
+    return keys, contexts
+
+
 def discover_upcoming(
     *,
     days_ahead: Optional[int] = None,
@@ -126,11 +208,25 @@ def discover_upcoming(
         if keys:
             log.info("watchlist fotmob discovered %d fixtures", len(keys))
             return keys, contexts
-        log.warning("fotmob watchlist empty — try WATCHLIST_FIXTURES")
+        log.warning("fotmob watchlist empty — try hibs upstream or WATCHLIST_FIXTURES")
+
+    from feeds.hibs_upstream_feed import HibsUpstreamFeed
+
+    if HibsUpstreamFeed.upstream_mode_enabled() or (os.environ.get("HIBS_UPSTREAM_BASE_URL") or "").strip():
+        keys, contexts = discover_from_hibs_upstream()
+        if keys:
+            return keys, contexts
+
+    keys, contexts = discover_from_scrape_lines_dir()
+    if keys:
+        return keys, contexts
 
     key = _api_key()
     if not key:
-        log.error("API_SPORTS_KEY not set — cannot auto-discover watchlist (set FVE_FEED_MODE=scrape or WATCHLIST_FIXTURES)")
+        log.error(
+            "API_SPORTS_KEY not set — cannot auto-discover watchlist "
+            "(set FVE_FEED_MODE=scrape, HIBS_UPSTREAM_BASE_URL, or WATCHLIST_FIXTURES)"
+        )
         return [], {}
 
     days = days_ahead if days_ahead is not None else int(os.environ.get("FVE_WATCHLIST_DAYS", "3"))

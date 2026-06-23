@@ -38,6 +38,20 @@ def fetch_lines(base: str, fixture_key: str, token: str) -> dict:
     return data
 
 
+def fetch_fixture_index(base: str, token: str) -> list[dict]:
+    url = f"{base.rstrip('/')}/api/fve/fixtures"
+    headers = {"User-Agent": "fve-hibs-collector/1.0", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise ValueError("non-object fixtures response")
+    rows = data.get("fixtures") or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Collect hibs lines JSON into scrape dir")
     ap.add_argument("--fixtures", default="", help="comma fixture keys or use --from-watchlist")
@@ -51,10 +65,18 @@ def main() -> int:
 
     keys: list[str] = []
     if args.from_watchlist:
-        from scrapers.fotmob_client import discover_fixtures
-        from config.fotmob_leagues import FOTMOB_LEAGUE_ID
+        try:
+            rows = fetch_fixture_index(base, token)
+            keys = [str(r.get("fixture_key") or "").strip() for r in rows if str(r.get("fixture_key") or "").strip()]
+        except (urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+            print(f"hibs /api/fve/fixtures failed ({exc!r}) — FotMob fallback", file=sys.stderr)
+        if not keys:
+            from scrapers.fotmob_client import discover_fixtures
+            from config.fotmob_leagues import FOTMOB_LEAGUE_ID
 
-        keys, _ = discover_fixtures(dict(FOTMOB_LEAGUE_ID), days_ahead=int(os.environ.get("FVE_WATCHLIST_DAYS", "3")))
+            keys, _ = discover_fixtures(
+                dict(FOTMOB_LEAGUE_ID), days_ahead=int(os.environ.get("FVE_WATCHLIST_DAYS", "3"))
+            )
     if args.fixtures:
         keys.extend(k.strip() for k in args.fixtures.split(",") if k.strip())
     if not keys:

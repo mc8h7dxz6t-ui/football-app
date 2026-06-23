@@ -96,6 +96,8 @@ services:
     command: ["python", "worker.py", "--auto"]
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
       FVE_AUTO_WATCHLIST: "1"
